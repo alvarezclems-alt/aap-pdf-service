@@ -406,15 +406,43 @@ def build_annexe1(project: dict, logo_bytes: bytes = None) -> bytes:
     story.append(sp(5))
 
     desc_raw = str(project.get('description', '') or '')
-    desc_clean = strip_markdown(desc_raw)
-    for line in desc_clean.split('\n'):
-        stripped = line.strip()
-        if stripped.startswith('• '):
-            story.append(para(f'• {clean(stripped[2:])}', S['body']))
-        elif stripped:
-            story.append(para(clean(stripped), S['body']))
-        else:
-            story.append(sp(3))
+
+    def render_rich_text(raw: str, story_list: list):
+        """Rend un texte en préservant les titres de section en gras."""
+        lines = raw.split('\n')
+        for line in lines:
+            stripped = line.strip()
+            if not stripped:
+                story_list.append(sp(3))
+                continue
+            # Titre Markdown ## ou ### → gras
+            if re.match(r'^#{1,4}\s+', stripped):
+                title_text = re.sub(r'^#{1,4}\s+', '', stripped)
+                story_list.append(para(f'<b>{clean(title_text)}</b>', S['body']))
+                continue
+            # **Titre** seul sur la ligne → gras
+            bold_match = re.match(r'^\*\*(.+?)\*\*\s*$', stripped)
+            if bold_match:
+                story_list.append(para(f'<b>{clean(bold_match.group(1))}</b>', S['body']))
+                continue
+            # Ligne courte sans ponctuation = sous-titre probable
+            pre_clean = strip_markdown(stripped)
+            is_subtitle = (
+                len(pre_clean) <= 80
+                and not pre_clean.endswith(('.', ',', ';'))
+                and not pre_clean.startswith(('•', '-', '*'))
+                and bool(re.search(r'^[A-ZÀ-Ü\d]', pre_clean))
+            )
+            if is_subtitle and not re.search(r'\b(le|la|les|des|une?|et|ou|dans|sur)\b', pre_clean[:30]):
+                story_list.append(para(f'<b>{clean(pre_clean)}</b>', S['body']))
+                continue
+            # Puce
+            if pre_clean.startswith('• '):
+                story_list.append(para(f'• {clean(pre_clean[2:])}', S['body']))
+            elif pre_clean:
+                story_list.append(para(clean(pre_clean), S['body']))
+
+    render_rich_text(desc_raw, story)
     story.append(sp(10))
 
     # ── Section 3 : Calendrier ─────────────────────────────────────────────────
@@ -439,9 +467,9 @@ def build_annexe1(project: dict, logo_bytes: bytes = None) -> bytes:
 
     cal_rows = [[
         para('<b>Grandes étapes</b>', S['lbl_bold']),
-        para('<b>Début\nprévisionnel</b>', S['lbl_bold']),
-        para('<b>Fin\nprévisionnelle</b>', S['lbl_bold']),
-        para('<b>Durée\nestimée</b>', S['lbl_bold']),
+        para('<b>Début prévisionnel</b>', S['lbl_bold']),
+        para('<b>Fin prévisionnelle</b>', S['lbl_bold']),
+        para('<b>Durée estimée</b>', S['lbl_bold']),
         para('<b>Livrables / jalons</b>', S['lbl_bold']),
     ]]
     for r in (cal or []):
@@ -455,7 +483,7 @@ def build_annexe1(project: dict, logo_bytes: bytes = None) -> bytes:
     while len(cal_rows) < 9:
         cal_rows.append([para('', S['lbl'])] * 5)
 
-    story.append(Table(cal_rows, colWidths=[148, 62, 62, 56, 155.5], style=TableStyle([
+    story.append(Table(cal_rows, colWidths=[148, 68, 68, 50, 149.5], style=TableStyle([
         ('BOX',           (0, 0), (-1, -1), 0.5, BLACK),
         ('INNERGRID',     (0, 0), (-1, -1), 0.3, BLACK),
         ('BACKGROUND',    (0, 0), (-1, 0),  GRAY_HEADER),
