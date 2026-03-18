@@ -1,66 +1,84 @@
 """
-api.py — Service Railway complet
-Backend PDF + IA Claude pour DocAdmin
-
-Variables d'environnement requises sur Railway :
-  ANTHROPIC_API_KEY=sk-ant-...
-  PORT=8080  (déjà en place)
+api.py — Version défensive : imports optionnels pour éviter les crashs
 """
-
-import io
-import os
-import json
-import traceback
-
-import anthropic
+import io, os, json, traceback
 from flask import Flask, request, jsonify, send_file
 from flask_cors import CORS
 
-from generate_annexes import (
-    generate_annexe1_pdf,
-    generate_annexe1bis_pdf,
-)
-from generate_vacataire import generate_vacataire_pdf
-
-# ── App Flask ──────────────────────────────────────────────────────────────────
 app = Flask(__name__)
 CORS(app, origins="*")
 
-# ── Client Claude ──────────────────────────────────────────────────────────────
-claude = anthropic.Anthropic(api_key=os.environ.get("ANTHROPIC_API_KEY", ""))
-CLAUDE_MODEL = "claude-sonnet-4-20250514"
+# ── Imports optionnels ─────────────────────────────────────────────────────────
+try:
+    import anthropic
+    claude = anthropic.Anthropic(api_key=os.environ.get("ANTHROPIC_API_KEY", ""))
+    CLAUDE_MODEL = "claude-sonnet-4-20250514"
+    CLAUDE_OK = True
+except ImportError:
+    CLAUDE_OK = False
+    print("WARNING: anthropic non installé")
+
+try:
+    from generate_annexes import generate_annexe1_pdf, generate_annexe1bis_pdf
+    ANNEXES_OK = True
+except ImportError as e:
+    ANNEXES_OK = False
+    print(f"WARNING: generate_annexes non trouvé: {e}")
+
+try:
+    from generate_vacataire import generate_vacataire_pdf
+    VACATAIRE_OK = True
+except ImportError as e:
+    VACATAIRE_OK = False
+    print(f"WARNING: generate_vacataire non trouvé: {e}")
 
 
-# ══════════════════════════════════════════════════════════════════════════════
-# UTILITAIRES
-# ══════════════════════════════════════════════════════════════════════════════
-
-def claude_text(system: str, user: str, max_tokens: int = 800) -> str:
-    """Appel Claude et retourne le texte brut de la réponse."""
+# ── Utilitaire Claude ──────────────────────────────────────────────────────────
+def claude_text(system, user, max_tokens=800):
+    if not CLAUDE_OK:
+        return "Service IA non disponible (anthropic non installé)"
     msg = claude.messages.create(
-        model=CLAUDE_MODEL,
-        max_tokens=max_tokens,
+        model=CLAUDE_MODEL, max_tokens=max_tokens,
         system=system,
-        messages=[{"role": "user", "content": user}],
+        messages=[{"role": "user", "content": user}]
     )
     return msg.content[0].text.strip()
 
 
-# ══════════════════════════════════════════════════════════════════════════════
-# ENDPOINTS EXISTANTS — AAP
-# ══════════════════════════════════════════════════════════════════════════════
+# ── Health ─────────────────────────────────────────────────────────────────────
+@app.route("/health", methods=["GET"])
+def health():
+    return jsonify({
+        "status": "ok",
+        "modules": {
+            "claude":     CLAUDE_OK,
+            "annexes":    ANNEXES_OK,
+            "vacataire":  VACATAIRE_OK,
+        },
+        "anthropic_key_set": bool(os.environ.get("ANTHROPIC_API_KEY")),
+        "endpoints": [
+            "POST /generate-annexe1",
+            "POST /generate-annexe1bis",
+            "POST /generate-all",
+            "POST /generate-vacataire",
+            "POST /ai/justification-vacataire",
+            "POST /ai/generer-section-aap",
+            "POST /ai/reviser-section",
+            "POST /ai/extraire-infos",
+        ]
+    }), 200
 
+
+# ── PDF AAP ────────────────────────────────────────────────────────────────────
 @app.route("/generate-annexe1", methods=["POST"])
 def generate_annexe1():
+    if not ANNEXES_OK:
+        return jsonify({"error": "Module generate_annexes non disponible"}), 503
     try:
         data = request.get_json(force=True)
-        pdf_bytes = generate_annexe1_pdf(data)
-        return send_file(
-            io.BytesIO(pdf_bytes),
-            mimetype="application/pdf",
-            as_attachment=True,
-            download_name="annexe1.pdf",
-        )
+        pdf  = generate_annexe1_pdf(data)
+        return send_file(io.BytesIO(pdf), mimetype="application/pdf",
+                         as_attachment=True, download_name="annexe1.pdf")
     except Exception as e:
         traceback.print_exc()
         return jsonify({"error": str(e)}), 500
@@ -68,15 +86,13 @@ def generate_annexe1():
 
 @app.route("/generate-annexe1bis", methods=["POST"])
 def generate_annexe1bis():
+    if not ANNEXES_OK:
+        return jsonify({"error": "Module generate_annexes non disponible"}), 503
     try:
         data = request.get_json(force=True)
-        pdf_bytes = generate_annexe1bis_pdf(data)
-        return send_file(
-            io.BytesIO(pdf_bytes),
-            mimetype="application/pdf",
-            as_attachment=True,
-            download_name="annexe1bis.pdf",
-        )
+        pdf  = generate_annexe1bis_pdf(data)
+        return send_file(io.BytesIO(pdf), mimetype="application/pdf",
+                         as_attachment=True, download_name="annexe1bis.pdf")
     except Exception as e:
         traceback.print_exc()
         return jsonify({"error": str(e)}), 500
@@ -85,132 +101,73 @@ def generate_annexe1bis():
 @app.route("/generate-all", methods=["POST"])
 def generate_all():
     import zipfile
+    if not ANNEXES_OK:
+        return jsonify({"error": "Module generate_annexes non disponible"}), 503
     try:
         data = request.get_json(force=True)
-        pdf1    = generate_annexe1_pdf(data)
-        pdf1bis = generate_annexe1bis_pdf(data)
-
-        buf = io.BytesIO()
+        buf  = io.BytesIO()
         with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as z:
-            z.writestr("annexe1.pdf",    pdf1)
-            z.writestr("annexe1bis.pdf", pdf1bis)
+            z.writestr("annexe1.pdf",    generate_annexe1_pdf(data))
+            z.writestr("annexe1bis.pdf", generate_annexe1bis_pdf(data))
         buf.seek(0)
-
-        return send_file(
-            buf,
-            mimetype="application/zip",
-            as_attachment=True,
-            download_name="dossier-complet.zip",
-        )
+        return send_file(buf, mimetype="application/zip",
+                         as_attachment=True, download_name="dossier-complet.zip")
     except Exception as e:
         traceback.print_exc()
         return jsonify({"error": str(e)}), 500
 
 
-# ══════════════════════════════════════════════════════════════════════════════
-# ENDPOINT NOUVEAU — PDF VACATAIRE
-# ══════════════════════════════════════════════════════════════════════════════
-
+# ── PDF Vacataire ──────────────────────────────────────────────────────────────
 @app.route("/generate-vacataire", methods=["POST"])
 def generate_vacataire():
-    """
-    Génère le PDF du dossier vacataire.
-    Corps JSON : { intervenant, intervention, justificatifs }
-    """
+    if not VACATAIRE_OK:
+        return jsonify({"error": "Module generate_vacataire non disponible"}), 503
     try:
-        data = request.get_json(force=True)
-        if not data:
-            return jsonify({"error": "Corps JSON vide"}), 400
-
-        i = data.get("intervenant", {})
+        data = request.get_json(force=True) or {}
+        i    = data.get("intervenant", {})
         if not i.get("nom") and not i.get("prenom"):
-            return jsonify({
-                "error": "Champs obligatoires manquants : nom/prénom"
-            }), 400
-
-        pdf_bytes = generate_vacataire_pdf(data)
-
+            return jsonify({"error": "nom/prénom manquant"}), 400
+        pdf  = generate_vacataire_pdf(data)
         nom    = i.get("nom", "intervenant").replace(" ", "-").lower()
         prenom = i.get("prenom", "").replace(" ", "-").lower()
-        filename = f"dossier-vacataire-{prenom}-{nom}.pdf"
-
-        return send_file(
-            io.BytesIO(pdf_bytes),
-            mimetype="application/pdf",
-            as_attachment=True,
-            download_name=filename,
-        )
+        return send_file(io.BytesIO(pdf), mimetype="application/pdf",
+                         as_attachment=True,
+                         download_name=f"dossier-vacataire-{prenom}-{nom}.pdf")
     except Exception as e:
         traceback.print_exc()
         return jsonify({"error": str(e)}), 500
 
 
-# ══════════════════════════════════════════════════════════════════════════════
-# ENDPOINTS IA — CLAUDE
-# ══════════════════════════════════════════════════════════════════════════════
-
+# ── IA Claude ──────────────────────────────────────────────────────────────────
 @app.route("/ai/justification-vacataire", methods=["POST"])
 def ai_justification_vacataire():
-    """
-    Génère le texte de justification d'un dossier vacataire via Claude.
-
-    Corps attendu :
-    {
-      "prenom": "Marie",
-      "nom": "Dupont",
-      "type_profil": "Auto-entrepreneur",
-      "specialites": "IA générative, formation, SIC",
-      "situation_pro": "Auto-entrepreneur",
-      "employeur_nom": "",
-      "intitule": "Introduction à l'IA générative",
-      "nature_intervention": "Cours magistral",
-      "niveau": "Master 2",
-      "etablissement_nom": "Université de Lille"
-    }
-    """
+    if not CLAUDE_OK:
+        return jsonify({"error": "Service Claude non disponible"}), 503
     try:
         d = request.get_json(force=True) or {}
-
         system = (
             "Tu es un assistant administratif expert dans la rédaction "
-            "de dossiers universitaires français. "
-            "Ton style est factuel, professionnel et précis. "
-            "Tu n'utilises pas de formules creuses ni d'adverbes superflus. "
-            "Tu rédiges uniquement en français."
+            "de dossiers universitaires français. Ton style est factuel, "
+            "professionnel et précis. Tu rédiges uniquement en français."
         )
+        user = f"""Rédige en 6 à 8 lignes un texte justifiant la compétence
+d'un intervenant vacataire. Commence directement par les compétences,
+sans phrase d'introduction. Utilise la troisième personne.
 
-        user = f"""Rédige en 6 à 8 lignes un texte justifiant la compétence 
-d'un intervenant vacataire pour une mission d'enseignement universitaire.
+Intervenant : {d.get('prenom','')} {d.get('nom','')}
+Profil : {d.get('type_profil','')}
+Spécialités : {d.get('specialites','')}
+Situation : {d.get('situation_pro','')}
+Employeur : {d.get('employeur_nom','') or 'Indépendant'}
 
-Commence directement par les compétences sans phrase d'introduction 
-du type "Je soussigné..." ou "Monsieur/Madame X...".
-Utilise la troisième personne.
-Sois concret : mentionne les domaines d'expertise, l'expérience pratique 
-et le lien avec la mission confiée.
+Mission :
+- Intitulé : {d.get('intitule','')}
+- Nature : {d.get('nature_intervention','')}
+- Niveau : {d.get('niveau','')}
+- Établissement : {d.get('etablissement_nom','')}
 
-Informations sur l'intervenant :
-- Nom et prénom : {d.get('prenom', '')} {d.get('nom', '')}
-- Type de profil : {d.get('type_profil', '')}
-- Spécialités / domaines : {d.get('specialites', '')}
-- Situation professionnelle : {d.get('situation_pro', '')}
-- Employeur principal : {d.get('employeur_nom', '') or 'Indépendant'}
-
-Mission d'enseignement :
-- Intitulé : {d.get('intitule', '')}
-- Nature : {d.get('nature_intervention', '')}
-- Niveau : {d.get('niveau', '')}
-- Établissement : {d.get('etablissement_nom', '')}
-
-Texte de justification :"""
-
-        texte = claude_text(system, user, max_tokens=600)
-        return jsonify({"texte": texte})
-
-    except anthropic.AuthenticationError:
-        return jsonify({
-            "error": "Clé API Claude invalide. "
-                     "Vérifiez ANTHROPIC_API_KEY sur Railway."
-        }), 401
+Texte :"""
+        return jsonify({"texte": claude_text(system, user, 600)})
     except Exception as e:
         traceback.print_exc()
         return jsonify({"error": str(e)}), 500
@@ -218,112 +175,57 @@ Texte de justification :"""
 
 @app.route("/ai/generer-section-aap", methods=["POST"])
 def ai_generer_section_aap():
-    """
-    Génère une section d'un dossier AAP via Claude.
-
-    Corps attendu :
-    {
-      "section": "description",   // description | resume | calendrier | budget
-      "projet": {
-        "titre": "...",
-        "description_libre": "...",
-        "axe": "...",
-        "mots_clefs": "...",
-        "coordinateur": "...",
-        "membres": [...],
-        "montant": 8000
-      }
-    }
-    """
+    if not CLAUDE_OK:
+        return jsonify({"error": "Service Claude non disponible"}), 503
     try:
         d       = request.get_json(force=True) or {}
         section = d.get("section", "description")
-        projet  = d.get("projet", {})
-
-        system = (
+        p       = d.get("projet", {})
+        system  = (
             "Tu es un expert en rédaction de dossiers de candidature "
-            "pour des appels à projets de recherche en éducation français "
-            "(ANR, INSPÉ, Région, etc.). "
+            "pour des appels à projets de recherche en éducation français. "
             "Ton style est académique, structuré et convaincant. "
-            "Tu respectes les contraintes de longueur demandées. "
             "Tu rédiges uniquement en français."
         )
-
         prompts = {
-            "resume": f"""Rédige un résumé de 8 à 10 lignes maximum pour le projet 
-de recherche suivant, destiné à être publié sur le site de l'institution.
-
-Titre : {projet.get('titre', '')}
-Description : {projet.get('description_libre', '')}
-Axe thématique : {projet.get('axe', '')}
-Mots-clefs : {projet.get('mots_clefs', '')}
-Équipe : {projet.get('coordinateur', '')} + {len(projet.get('membres', []))} membre(s)
-
-Le résumé doit présenter : le contexte et la problématique, 
-l'approche méthodologique, les résultats attendus et les livrables.
+            "resume": f"""Rédige un résumé de 8 à 10 lignes pour ce projet.
+Titre : {p.get('titre','')}
+Description : {p.get('description_libre','')}
+Axe : {p.get('axe','')} | Mots-clefs : {p.get('mots_clefs','')}
+Présente : contexte, approche, résultats attendus, livrables.
 Résumé :""",
 
-            "description": f"""Rédige la description scientifique complète (3 pages max) 
-du projet de recherche suivant pour un dossier de candidature AAP.
-
-Structure ta réponse avec ces sous-sections en gras :
+            "description": f"""Rédige la description scientifique complète (3 pages max).
+Structure avec ces sous-titres en gras :
 **Inscription générale et problématique**
 **Résultats antérieurs, originalité et enjeux**
 **Objectifs précis et hypothèses de travail**
 **Cadres théoriques, méthodologie et sources**
 **Résultats attendus, restitution et diffusion**
 
-Titre : {projet.get('titre', '')}
-Description libre : {projet.get('description_libre', '')}
-Axe : {projet.get('axe', '')}
-Mots-clefs : {projet.get('mots_clefs', '')}
-Coordinateur : {projet.get('coordinateur', '')}
-Budget demandé : {projet.get('montant', '')} €
-
+Titre : {p.get('titre','')}
+Description : {p.get('description_libre','')}
+Axe : {p.get('axe','')} | Budget : {p.get('montant','')} €
 Description :""",
 
-            "calendrier": f"""Génère un calendrier prévisionnel en tableau Markdown 
-pour le projet de recherche suivant. Le projet dure 2 ans (2027-2028).
-
-Format du tableau (obligatoire) :
+            "calendrier": f"""Génère un calendrier en tableau Markdown pour ce projet 
+de recherche sur 2 ans (2027-2028). Format obligatoire :
 | Grandes étapes | Début prévisionnel | Fin prévisionnelle | Durée estimée |
 |---|---|---|---|
-| ... | ... | ... | ... |
-
-Titre : {projet.get('titre', '')}
-Description : {projet.get('description_libre', '')}
-
-Génère 8 à 10 étapes réalistes couvrant : revue de littérature, 
-collecte de données, analyse, restitution, livrables, valorisation.
+Titre : {p.get('titre','')}
+8 à 10 étapes couvrant : littérature, collecte, analyse, 
+restitution, livrables, valorisation.
 Tableau :""",
 
-            "budget": f"""Génère une justification des dépenses pour un projet 
-de recherche avec un budget de {projet.get('montant', 8000)} € sur 2 ans.
-
-Titre du projet : {projet.get('titre', '')}
-Description : {projet.get('description_libre', '')}
-
-Propose une répartition réaliste entre :
-- Frais de mission (déplacements, hébergement)
-- Prestations de recherche
-- Organisation de séminaires / journées d'étude
-- Vacations éventuelles
-- Matériel consommable
-
-Format : liste structurée avec montants estimés en euros.
+            "budget": f"""Justifie les dépenses pour un budget de {p.get('montant',8000)} € 
+sur 2 ans pour ce projet : {p.get('titre','')}
+Répartition entre : missions, prestations, séminaires, vacations, matériel.
+Format : liste avec montants en euros.
 Justification :""",
         }
-
-        prompt_user = prompts.get(section, prompts["description"])
-        texte = claude_text(system, prompt_user,
-                            max_tokens=2000 if section == "description" else 800)
+        max_t = 2000 if section == "description" else 800
+        texte = claude_text(system, prompts.get(section, prompts["description"]), max_t)
         return jsonify({"texte": texte, "section": section})
-
-    except anthropic.AuthenticationError:
-        return jsonify({
-            "error": "Clé API Claude invalide. "
-                     "Vérifiez ANTHROPIC_API_KEY sur Railway."
-        }), 401
     except Exception as e:
         traceback.print_exc()
         return jsonify({"error": str(e)}), 500
@@ -331,43 +233,19 @@ Justification :""",
 
 @app.route("/ai/reviser-section", methods=["POST"])
 def ai_reviser_section():
-    """
-    Révise/améliore un texte existant via Claude.
-
-    Corps attendu :
-    {
-      "texte_original": "...",
-      "instruction": "Rends ce texte plus concis",
-      "contexte": "Section description d'un AAP recherche en éducation"
-    }
-    """
+    if not CLAUDE_OK:
+        return jsonify({"error": "Service Claude non disponible"}), 503
     try:
         d = request.get_json(force=True) or {}
-
-        system = (
-            "Tu es un expert en rédaction académique française. "
-            "Tu révises des textes en respectant scrupuleusement "
-            "les instructions données. "
-            "Tu retournes uniquement le texte révisé, sans commentaire."
-        )
-
-        user = f"""Contexte : {d.get('contexte', 'Dossier administratif')}
-
-Instruction : {d.get('instruction', 'Améliore ce texte')}
-
+        system = ("Tu es un expert en rédaction académique française. "
+                  "Tu révises les textes en respectant les instructions. "
+                  "Tu retournes uniquement le texte révisé, sans commentaire.")
+        user = f"""Contexte : {d.get('contexte','Dossier administratif')}
+Instruction : {d.get('instruction','Améliore ce texte')}
 Texte original :
-{d.get('texte_original', '')}
-
+{d.get('texte_original','')}
 Texte révisé :"""
-
-        texte = claude_text(system, user, max_tokens=1500)
-        return jsonify({"texte": texte})
-
-    except anthropic.AuthenticationError:
-        return jsonify({
-            "error": "Clé API Claude invalide. "
-                     "Vérifiez ANTHROPIC_API_KEY sur Railway."
-        }), 401
+        return jsonify({"texte": claude_text(system, user, 1500)})
     except Exception as e:
         traceback.print_exc()
         return jsonify({"error": str(e)}), 500
@@ -375,120 +253,40 @@ Texte révisé :"""
 
 @app.route("/ai/extraire-infos", methods=["POST"])
 def ai_extraire_infos():
-    """
-    Extrait les informations structurées d'un texte brut de projet.
-    Utile pour le wizard "Nouvel AAP" — import texte → pré-remplissage.
-
-    Corps attendu :
-    {
-      "texte": "Texte brut du projet ou de l'AAP...",
-      "type": "projet"   // projet | aap
-    }
-    """
+    if not CLAUDE_OK:
+        return jsonify({"error": "Service Claude non disponible"}), 503
+    raw = ""
     try:
-        d    = request.get_json(force=True) or {}
+        d     = request.get_json(force=True) or {}
         texte = d.get("texte", "")
         typ   = d.get("type", "projet")
-
-        system = (
-            "Tu es un assistant expert en extraction d'informations. "
-            "Tu retournes UNIQUEMENT un objet JSON valide, "
-            "sans texte avant ni après, sans balises markdown."
-        )
-
-        if typ == "projet":
-            schema = """{
-  "titre": "...",
-  "acronyme": "...",
-  "mots_clefs": "...",
-  "resume": "...",
-  "description": "...",
-  "coordinateur_nom": "...",
-  "coordinateur_email": "...",
-  "institution": "...",
-  "laboratoire": "...",
-  "membres": [{"nom": "...", "email": "...", "grade": "..."}],
-  "montant": 0,
-  "axe": "..."
-}"""
-        else:
-            schema = """{
-  "nom_aap": "...",
-  "institution": "...",
-  "deadline": "...",
-  "budget_max": 0,
-  "axes": ["..."],
-  "criteres_eligibilite": "...",
-  "description": "..."
-}"""
-
-        user = f"""Extrais les informations du texte suivant et retourne 
-un JSON avec exactement cette structure :
-{schema}
-
-Si une information est absente, utilise null ou une chaîne vide.
-
-Texte à analyser :
-{texte[:6000]}
-
-JSON :"""
-
-        raw = claude_text(system, user, max_tokens=1200)
-
-        # Nettoyer les éventuelles balises markdown
-        raw = raw.strip()
+        system = ("Tu es un assistant expert en extraction d'informations. "
+                  "Tu retournes UNIQUEMENT un objet JSON valide, "
+                  "sans texte avant ni après, sans balises markdown.")
+        schema = ('{"titre":"","acronyme":"","mots_clefs":"","resume":"",'
+                  '"description":"","coordinateur_nom":"","coordinateur_email":"",'
+                  '"institution":"","laboratoire":"","membres":[],'
+                  '"montant":0,"axe":""}') if typ == "projet" else (
+                  '{"nom_aap":"","institution":"","deadline":"",'
+                  '"budget_max":0,"axes":[],"criteres_eligibilite":"","description":""}')
+        user  = f"Extrais les informations et retourne ce JSON :\n{schema}\n\nTexte :\n{texte[:6000]}\n\nJSON :"
+        raw   = claude_text(system, user, 1200)
+        raw   = raw.strip()
         if raw.startswith("```"):
             raw = raw.split("```")[1]
             if raw.startswith("json"):
                 raw = raw[4:]
-        raw = raw.strip()
-
-        infos = json.loads(raw)
-        return jsonify({"infos": infos})
-
+        return jsonify({"infos": json.loads(raw.strip())})
     except json.JSONDecodeError as e:
-        return jsonify({
-            "error": f"Réponse Claude non parseable : {str(e)}",
-            "raw": raw if "raw" in dir() else ""
-        }), 500
-    except anthropic.AuthenticationError:
-        return jsonify({
-            "error": "Clé API Claude invalide. "
-                     "Vérifiez ANTHROPIC_API_KEY sur Railway."
-        }), 401
+        return jsonify({"error": f"JSON invalide: {e}", "raw": raw}), 500
     except Exception as e:
         traceback.print_exc()
         return jsonify({"error": str(e)}), 500
 
 
-# ══════════════════════════════════════════════════════════════════════════════
-# SANTÉ ET DÉMARRAGE
-# ══════════════════════════════════════════════════════════════════════════════
-
-@app.route("/health", methods=["GET"])
-def health():
-    key_ok = bool(os.environ.get("ANTHROPIC_API_KEY", ""))
-    return jsonify({
-        "status": "ok",
-        "claude_model": CLAUDE_MODEL,
-        "anthropic_key_set": key_ok,
-        "endpoints": {
-            "pdf": [
-                "POST /generate-annexe1",
-                "POST /generate-annexe1bis",
-                "POST /generate-all",
-                "POST /generate-vacataire",
-            ],
-            "ai": [
-                "POST /ai/justification-vacataire",
-                "POST /ai/generer-section-aap",
-                "POST /ai/reviser-section",
-                "POST /ai/extraire-infos",
-            ],
-        }
-    }), 200
-
-
+# ── Démarrage ──────────────────────────────────────────────────────────────────
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 8080))
+    print(f"Démarrage sur port {port}")
+    print(f"  Claude: {CLAUDE_OK} | Annexes: {ANNEXES_OK} | Vacataire: {VACATAIRE_OK}")
     app.run(host="0.0.0.0", port=port, debug=False)
