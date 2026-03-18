@@ -1,7 +1,8 @@
 """
-api.py — Version défensive : imports optionnels pour éviter les crashs
+api.py — Service Railway complet DocAdmin
+Tous les endpoints PDF + IA Claude + remplissage de documents
 """
-import io, os, json, traceback
+import io, os, json, traceback, base64
 from flask import Flask, request, jsonify, send_file
 from flask_cors import CORS
 
@@ -32,11 +33,18 @@ except ImportError as e:
     VACATAIRE_OK = False
     print(f"WARNING: generate_vacataire non trouvé: {e}")
 
+try:
+    from docx import Document as DocxDoc
+    DOCX_OK = True
+except ImportError as e:
+    DOCX_OK = False
+    print(f"WARNING: python-docx non trouvé: {e}")
+
 
 # ── Utilitaire Claude ──────────────────────────────────────────────────────────
 def claude_text(system, user, max_tokens=800):
     if not CLAUDE_OK:
-        return "Service IA non disponible (anthropic non installé)"
+        return "Service IA non disponible"
     msg = claude.messages.create(
         model=CLAUDE_MODEL, max_tokens=max_tokens,
         system=system,
@@ -51,9 +59,10 @@ def health():
     return jsonify({
         "status": "ok",
         "modules": {
-            "claude":     CLAUDE_OK,
-            "annexes":    ANNEXES_OK,
-            "vacataire":  VACATAIRE_OK,
+            "claude":    CLAUDE_OK,
+            "annexes":   ANNEXES_OK,
+            "vacataire": VACATAIRE_OK,
+            "docx":      DOCX_OK,
         },
         "anthropic_key_set": bool(os.environ.get("ANTHROPIC_API_KEY")),
         "endpoints": [
@@ -65,11 +74,15 @@ def health():
             "POST /ai/generer-section-aap",
             "POST /ai/reviser-section",
             "POST /ai/extraire-infos",
+            "POST /ai/remplir-document",
         ]
     }), 200
 
 
-# ── PDF AAP ────────────────────────────────────────────────────────────────────
+# ══════════════════════════════════════════════════════════════════════════════
+# PDF AAP
+# ══════════════════════════════════════════════════════════════════════════════
+
 @app.route("/generate-annexe1", methods=["POST"])
 def generate_annexe1():
     if not ANNEXES_OK:
@@ -117,7 +130,10 @@ def generate_all():
         return jsonify({"error": str(e)}), 500
 
 
-# ── PDF Vacataire ──────────────────────────────────────────────────────────────
+# ══════════════════════════════════════════════════════════════════════════════
+# PDF VACATAIRE
+# ══════════════════════════════════════════════════════════════════════════════
+
 @app.route("/generate-vacataire", methods=["POST"])
 def generate_vacataire():
     if not VACATAIRE_OK:
@@ -127,7 +143,7 @@ def generate_vacataire():
         i    = data.get("intervenant", {})
         if not i.get("nom") and not i.get("prenom"):
             return jsonify({"error": "nom/prénom manquant"}), 400
-        pdf  = generate_vacataire_pdf(data)
+        pdf    = generate_vacataire_pdf(data)
         nom    = i.get("nom", "intervenant").replace(" ", "-").lower()
         prenom = i.get("prenom", "").replace(" ", "-").lower()
         return send_file(io.BytesIO(pdf), mimetype="application/pdf",
@@ -138,7 +154,10 @@ def generate_vacataire():
         return jsonify({"error": str(e)}), 500
 
 
-# ── IA Claude ──────────────────────────────────────────────────────────────────
+# ══════════════════════════════════════════════════════════════════════════════
+# IA — JUSTIFICATION VACATAIRE
+# ══════════════════════════════════════════════════════════════════════════════
+
 @app.route("/ai/justification-vacataire", methods=["POST"])
 def ai_justification_vacataire():
     if not CLAUDE_OK:
@@ -172,6 +191,10 @@ Texte :"""
         traceback.print_exc()
         return jsonify({"error": str(e)}), 500
 
+
+# ══════════════════════════════════════════════════════════════════════════════
+# IA — GÉNÉRER SECTION AAP
+# ══════════════════════════════════════════════════════════════════════════════
 
 @app.route("/ai/generer-section-aap", methods=["POST"])
 def ai_generer_section_aap():
@@ -208,18 +231,17 @@ Description : {p.get('description_libre','')}
 Axe : {p.get('axe','')} | Budget : {p.get('montant','')} €
 Description :""",
 
-            "calendrier": f"""Génère un calendrier en tableau Markdown pour ce projet 
+            "calendrier": f"""Génère un calendrier en tableau Markdown pour ce projet
 de recherche sur 2 ans (2027-2028). Format obligatoire :
 | Grandes étapes | Début prévisionnel | Fin prévisionnelle | Durée estimée |
 |---|---|---|---|
 Titre : {p.get('titre','')}
-8 à 10 étapes couvrant : littérature, collecte, analyse, 
-restitution, livrables, valorisation.
+8 à 10 étapes.
 Tableau :""",
 
-            "budget": f"""Justifie les dépenses pour un budget de {p.get('montant',8000)} € 
-sur 2 ans pour ce projet : {p.get('titre','')}
-Répartition entre : missions, prestations, séminaires, vacations, matériel.
+            "budget": f"""Justifie les dépenses pour un budget de {p.get('montant',8000)} €
+sur 2 ans : {p.get('titre','')}
+Répartition : missions, prestations, séminaires, vacations, matériel.
 Format : liste avec montants en euros.
 Justification :""",
         }
@@ -231,25 +253,35 @@ Justification :""",
         return jsonify({"error": str(e)}), 500
 
 
+# ══════════════════════════════════════════════════════════════════════════════
+# IA — RÉVISER UNE SECTION
+# ══════════════════════════════════════════════════════════════════════════════
+
 @app.route("/ai/reviser-section", methods=["POST"])
 def ai_reviser_section():
     if not CLAUDE_OK:
         return jsonify({"error": "Service Claude non disponible"}), 503
     try:
         d = request.get_json(force=True) or {}
-        system = ("Tu es un expert en rédaction académique française. "
-                  "Tu révises les textes en respectant les instructions. "
-                  "Tu retournes uniquement le texte révisé, sans commentaire.")
-        user = f"""Contexte : {d.get('contexte','Dossier administratif')}
-Instruction : {d.get('instruction','Améliore ce texte')}
+        system = (
+            "Tu es un expert en rédaction académique française. "
+            "Tu révises les textes en respectant les instructions. "
+            "Tu retournes uniquement le texte révisé, sans commentaire."
+        )
+        user = f"""Contexte : {d.get('contexte', 'Dossier administratif')}
+Instruction : {d.get('instruction', 'Améliore ce texte')}
 Texte original :
-{d.get('texte_original','')}
+{d.get('texte_original', '')}
 Texte révisé :"""
         return jsonify({"texte": claude_text(system, user, 1500)})
     except Exception as e:
         traceback.print_exc()
         return jsonify({"error": str(e)}), 500
 
+
+# ══════════════════════════════════════════════════════════════════════════════
+# IA — EXTRAIRE INFOS D'UN TEXTE
+# ══════════════════════════════════════════════════════════════════════════════
 
 @app.route("/ai/extraire-infos", methods=["POST"])
 def ai_extraire_infos():
@@ -260,18 +292,21 @@ def ai_extraire_infos():
         d     = request.get_json(force=True) or {}
         texte = d.get("texte", "")
         typ   = d.get("type", "projet")
-        system = ("Tu es un assistant expert en extraction d'informations. "
-                  "Tu retournes UNIQUEMENT un objet JSON valide, "
-                  "sans texte avant ni après, sans balises markdown.")
-        schema = ('{"titre":"","acronyme":"","mots_clefs":"","resume":"",'
-                  '"description":"","coordinateur_nom":"","coordinateur_email":"",'
-                  '"institution":"","laboratoire":"","membres":[],'
-                  '"montant":0,"axe":""}') if typ == "projet" else (
-                  '{"nom_aap":"","institution":"","deadline":"",'
-                  '"budget_max":0,"axes":[],"criteres_eligibilite":"","description":""}')
-        user  = f"Extrais les informations et retourne ce JSON :\n{schema}\n\nTexte :\n{texte[:6000]}\n\nJSON :"
-        raw   = claude_text(system, user, 1200)
-        raw   = raw.strip()
+        system = (
+            "Tu es un assistant expert en extraction d'informations. "
+            "Tu retournes UNIQUEMENT un objet JSON valide, "
+            "sans texte avant ni après, sans balises markdown."
+        )
+        schema = (
+            '{"titre":"","acronyme":"","mots_clefs":"","resume":"",'
+            '"description":"","coordinateur_nom":"","coordinateur_email":"",'
+            '"institution":"","laboratoire":"","membres":[],'
+            '"montant":0,"axe":""}') if typ == "projet" else (
+            '{"nom_aap":"","institution":"","deadline":"",'
+            '"budget_max":0,"axes":[],"criteres_eligibilite":"","description":""}')
+        user = f"Extrais les informations et retourne ce JSON :\n{schema}\n\nTexte :\n{texte[:6000]}\n\nJSON :"
+        raw  = claude_text(system, user, 1200)
+        raw  = raw.strip()
         if raw.startswith("```"):
             raw = raw.split("```")[1]
             if raw.startswith("json"):
@@ -284,9 +319,171 @@ def ai_extraire_infos():
         return jsonify({"error": str(e)}), 500
 
 
-# ── Démarrage ──────────────────────────────────────────────────────────────────
+# ══════════════════════════════════════════════════════════════════════════════
+# IA — REMPLIR UN DOCUMENT ADMINISTRATIF (.docx)
+# ══════════════════════════════════════════════════════════════════════════════
+
+def _appliquer_remplacements(doc, remplacements: dict):
+    """Remplace les chaînes dans tous les paragraphes et tableaux."""
+    for ancien, nouveau in remplacements.items():
+        if not isinstance(ancien, str) or not isinstance(nouveau, str):
+            continue
+        for para in doc.paragraphs:
+            if ancien in para.text:
+                for run in para.runs:
+                    if ancien in run.text:
+                        run.text = run.text.replace(ancien, nouveau)
+                        break
+                else:
+                    if para.runs:
+                        para.runs[0].text = para.text.replace(ancien, nouveau)
+                        for run in para.runs[1:]:
+                            run.text = ""
+        for table in doc.tables:
+            for row in table.rows:
+                for cell in row.cells:
+                    for para in cell.paragraphs:
+                        if ancien in para.text:
+                            for run in para.runs:
+                                if ancien in run.text:
+                                    run.text = run.text.replace(ancien, nouveau)
+                                    break
+                            else:
+                                if para.runs:
+                                    para.runs[0].text = para.text.replace(ancien, nouveau)
+                                    for run in para.runs[1:]:
+                                        run.text = ""
+
+
+def _fallback_remplacements(profil: dict) -> dict:
+    p = profil
+    adresse = f"{p.get('adresse','')} {p.get('code_postal','')} {p.get('ville','')}".strip()
+    return {
+        "Nom d'usage : ………………………………………………………." : f"Nom d'usage : {p.get('nom','')}",
+        "Nom patronymique : …………………………………………"    : f"Nom patronymique : {p.get('nom','')}",
+        "Prénom(s) : ……………………………………………………"      : f"Prénom(s) : {p.get('prenom','')}",
+        "…….../…..…../…..….."                          : p.get('date_naissance',''),
+        "Nationalité : …………………………"                   : f"Nationalité : {p.get('nationalite','Française')}",
+        "N° Sécurité Sociale : "                       : f"N° Sécurité Sociale : {p.get('num_secu','')}",
+        "Adresse : N°……."                              : f"Adresse : {adresse}",
+    }
+
+
+@app.route("/ai/remplir-document", methods=["POST"])
+def ai_remplir_document():
+    """
+    Reçoit un DOCX en base64 + le profil utilisateur.
+    Claude repère tous les champs vides et les remplit avec le profil.
+    Retourne le DOCX complété.
+    """
+    if not CLAUDE_OK:
+        return jsonify({"error": "Service Claude non disponible"}), 503
+    if not DOCX_OK:
+        return jsonify({"error": "python-docx non installé"}), 503
+    try:
+        data     = request.get_json(force=True) or {}
+        profil   = data.get("profil", {})
+        b64      = data.get("fichier_base64", "")
+        nom_fich = data.get("nom_fichier", "document.docx")
+
+        if not b64:
+            return jsonify({"error": "fichier_base64 manquant"}), 400
+
+        docx_bytes = base64.b64decode(b64)
+        doc = DocxDoc(io.BytesIO(docx_bytes))
+
+        # Extraire le texte brut
+        texte_doc = []
+        for para in doc.paragraphs:
+            if para.text.strip():
+                texte_doc.append(para.text)
+        for table in doc.tables:
+            for row in table.rows:
+                for cell in row.cells:
+                    if cell.text.strip():
+                        texte_doc.append(cell.text)
+        texte_brut = "\n".join(texte_doc)[:5000]
+
+        system = (
+            "Tu es un assistant expert en administration française. "
+            "Tu analyses des documents administratifs et identifies "
+            "les valeurs exactes à insérer pour chaque champ vide. "
+            "Tu retournes UNIQUEMENT un objet JSON valide, "
+            "sans texte avant ni après, sans balises markdown."
+        )
+
+        user = f"""Voici le texte d'un document administratif français à compléter :
+
+{texte_brut}
+
+Voici le profil de la personne :
+{json.dumps(profil, ensure_ascii=False, indent=2)}
+
+Retourne un objet JSON où chaque clé est le texte EXACT à remplacer
+dans le document (copié mot pour mot depuis le document),
+et la valeur est ce qu'il faut mettre à la place.
+
+Règles :
+- Copie exactement les chaînes à remplacer (avec les pointillés, etc.)
+- Pour les cases □, remplace □ par ☑ pour la bonne case
+- Ne remplis que les champs pour lesquels tu as l'information
+
+Exemple :
+{{
+  "Nom d'usage : ………………………………………………………." : "Nom d'usage : DUPONT",
+  "Prénom(s) : ……………………………………………………" : "Prénom(s) : Marie",
+  "Né(e) le : …….../…..…../…..….." : "Né(e) le : 15/03/1985",
+  "□ Travailleur non-salarié" : "☑ Travailleur non-salarié"
+}}
+
+JSON :"""
+
+        raw = claude_text(system, user, max_tokens=2000)
+        raw = raw.strip()
+        if raw.startswith("```"):
+            parts = raw.split("```")
+            raw = parts[1] if len(parts) > 1 else raw
+            if raw.startswith("json"):
+                raw = raw[4:]
+        raw = raw.strip()
+
+        try:
+            remplacements = json.loads(raw)
+        except json.JSONDecodeError:
+            print(f"WARNING: fallback remplacements (JSON invalide)")
+            remplacements = _fallback_remplacements(profil)
+
+        doc_out = DocxDoc(io.BytesIO(docx_bytes))
+        _appliquer_remplacements(doc_out, remplacements)
+
+        buf = io.BytesIO()
+        doc_out.save(buf)
+        buf.seek(0)
+
+        p = profil
+        if p.get("nom") and p.get("prenom"):
+            nom_sortie = f"document-{p['prenom'].lower()}-{p['nom'].lower()}.docx"
+        else:
+            nom_sortie = f"{os.path.splitext(nom_fich)[0]}-complété.docx"
+
+        return send_file(
+            buf,
+            mimetype="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+            as_attachment=True,
+            download_name=nom_sortie,
+        )
+
+    except Exception as e:
+        traceback.print_exc()
+        return jsonify({"error": str(e)}), 500
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# DÉMARRAGE
+# ══════════════════════════════════════════════════════════════════════════════
+
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 8080))
     print(f"Démarrage sur port {port}")
-    print(f"  Claude: {CLAUDE_OK} | Annexes: {ANNEXES_OK} | Vacataire: {VACATAIRE_OK}")
+    print(f"  Claude:{CLAUDE_OK} | Annexes:{ANNEXES_OK} | Vacataire:{VACATAIRE_OK} | Docx:{DOCX_OK}")
     app.run(host="0.0.0.0", port=port, debug=False)
