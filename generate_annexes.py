@@ -83,13 +83,36 @@ class AAPDocTemplate(BaseDocTemplate):
 
 # ─── Helpers texte sécurisé ───────────────────────────────────────────────────
 
-def strip_markdown(text: str) -> str:
+def strip_html(text: str) -> str:
     """
-    Supprime les marqueurs Markdown courants d'un texte brut.
-    Ne rend PAS de HTML — produit du texte pur pour ReportLab.
+    Supprime toutes les balises HTML d'un texte.
+    <b>foo</b> → foo  |  <i>bar</i> → bar  |  <br/> → \n
+    Gère aussi les entités HTML courantes.
     """
     if not text:
         return ''
+    # <br> et <br/> → saut de ligne
+    text = re.sub(r'<br\s*/?>', '\n', text, flags=re.IGNORECASE)
+    # Supprimer toutes les autres balises HTML
+    text = re.sub(r'<[^>]+>', '', text)
+    # Décoder les entités HTML courantes
+    text = text.replace('&amp;', '&')
+    text = text.replace('&lt;', '<').replace('&gt;', '>')
+    text = text.replace('&nbsp;', ' ')
+    text = text.replace('&quot;', '"').replace('&#39;', "'")
+    return text
+
+
+def strip_markdown(text: str) -> str:
+    """
+    Supprime les marqueurs Markdown courants d'un texte brut.
+    Commence par strip_html() pour nettoyer les balises HTML résiduelles.
+    Produit du texte pur pour ReportLab.
+    """
+    if not text:
+        return ''
+    # D'abord supprimer les balises HTML éventuelles
+    text = strip_html(str(text))
     # Supprimer les blocs de code fenced (``` ... ```)
     text = re.sub(r'```[\s\S]*?```', '', text)
     # Supprimer les séparateurs --- / ===
@@ -106,7 +129,6 @@ def strip_markdown(text: str) -> str:
     text = re.sub(r'\[([^\]]+)\]\([^\)]+\)', r'\1', text)
     # Puces * - + en début de ligne → •
     text = re.sub(r'^[\*\-\+]\s+', '• ', text, flags=re.MULTILINE)
-    # Numérotation 1. 2. → garder
     # Supprimer les lignes de tableau Markdown (|----|)
     text = re.sub(r'^\s*\|[-:\s|]+\|\s*$', '', text, flags=re.MULTILINE)
     # Nettoyer les lignes vides multiples
@@ -114,11 +136,22 @@ def strip_markdown(text: str) -> str:
     return text.strip()
 
 
-def clean(text: str, max_chars: int = 4000) -> str:
-    """Échappe les caractères XML spéciaux pour ReportLab."""
+def safe_xml(text: str, max_chars: int = 4000) -> str:
+    """Échappe uniquement & sans toucher aux balises HTML — pour texte hardcodé."""
     if not text:
         return ''
     text = str(text)
+    if len(text) > max_chars:
+        text = text[:max_chars] + '…'
+    text = re.sub(r'&(?!amp;|lt;|gt;|nbsp;|quot;)', '&amp;', text)
+    return text
+
+
+def clean(text: str, max_chars: int = 4000) -> str:
+    """Strip HTML/Markdown utilisateur puis échappe XML pour ReportLab."""
+    if not text:
+        return ''
+    text = strip_html(str(text))
     if len(text) > max_chars:
         text = text[:max_chars] + '…'
     text = text.replace('&', '&amp;')
@@ -127,12 +160,30 @@ def clean(text: str, max_chars: int = 4000) -> str:
 
 
 def clean_md(text: str, max_chars: int = 4000) -> str:
-    """Strip Markdown PUIS échappe XML — pour les champs texte libre."""
+    """Strip HTML + Markdown PUIS échappe XML — pour les champs texte libre."""
     return clean(strip_markdown(str(text or '')), max_chars)
 
 
 def para(text: str, style, max_chars: int = 4000) -> Paragraph:
-    """Crée un Paragraph robuste avec double fallback."""
+    """
+    Paragraph pour texte HARDCODÉ avec HTML ReportLab légitime (<b>, <i>…).
+    Utilise safe_xml() — conserve les balises HTML.
+    """
+    try:
+        return Paragraph(safe_xml(text, max_chars), style)
+    except Exception:
+        try:
+            safe = re.sub(r'[^\x20-\x7E\n]', ' ', str(text))[:max_chars]
+            return Paragraph(safe, style)
+        except Exception:
+            return Paragraph('(texte non affichable)', style)
+
+
+def para_user(text: str, style, max_chars: int = 4000) -> Paragraph:
+    """
+    Paragraph pour texte UTILISATEUR (peut contenir HTML/Markdown brut).
+    Strip tout puis échappe pour ReportLab.
+    """
     try:
         return Paragraph(clean(text, max_chars), style)
     except Exception:
@@ -144,8 +195,8 @@ def para(text: str, style, max_chars: int = 4000) -> Paragraph:
 
 
 def para_md(text: str, style, max_chars: int = 4000) -> Paragraph:
-    """Paragraph avec strip Markdown préalable."""
-    return para(clean_md(text, max_chars), style, max_chars)
+    """Paragraph utilisateur avec strip HTML + Markdown préalable."""
+    return para_user(clean_md(text, max_chars), style)
 
 
 def sp(h=6):
@@ -172,8 +223,11 @@ def form_table(rows: list, col1_w: float = 168) -> Table:
     for lbl_raw, val in rows:
         bold = lbl_raw.startswith('**')
         lbl_txt = lbl_raw[2:] if bold else lbl_raw
-        p_lbl = para(f'<b>{clean(lbl_txt)}</b>' if bold else clean(lbl_txt), S['lbl'])
-        p_val = para(clean_md(str(val or ''), 2000), S['val'])
+        # Labels hardcodés : safe_xml conserve le HTML ReportLab
+        lbl_clean = safe_xml(strip_html(lbl_txt))
+        p_lbl = para(f'<b>{lbl_clean}</b>' if bold else lbl_clean, S['lbl'])
+        # Valeurs utilisateur : strip HTML/Markdown brut
+        p_val = para_user(clean_md(str(val or ''), 2000), S['val'])
         data.append([p_lbl, p_val])
     ts = TableStyle([
         ('BOX',           (0, 0), (-1, -1), 0.5, BLACK),
