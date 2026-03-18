@@ -1,7 +1,7 @@
 """
-generate_annexes.py — v3
+generate_annexes.py — v4
 Génère pixel-perfect les Annexe 1 et Annexe 1bis AAP INSPÉ Lille HdF
-Robuste aux textes longs et caractères spéciaux.
+Robuste aux textes longs, caractères spéciaux et Markdown brut.
 """
 import io, re
 from reportlab.lib.pagesizes import A4
@@ -82,21 +82,57 @@ class AAPDocTemplate(BaseDocTemplate):
         cv.restoreState()
 
 # ─── Helpers texte sécurisé ───────────────────────────────────────────────────
-def clean(text: str, max_chars: int = 4000) -> str:
-    """Nettoie un texte pour ReportLab : échappe XML, retire balises orphelines."""
+
+def strip_markdown(text: str) -> str:
+    """
+    Supprime les marqueurs Markdown courants d'un texte brut.
+    Ne rend PAS de HTML — produit du texte pur pour ReportLab.
+    """
     if not text:
         return ''
-    # Tronquer
+    # Supprimer les blocs de code fenced (``` ... ```)
+    text = re.sub(r'```[\s\S]*?```', '', text)
+    # Supprimer les séparateurs --- / ===
+    text = re.sub(r'^[-=]{3,}\s*$', '', text, flags=re.MULTILINE)
+    # Titres ### ## # → garder uniquement le texte
+    text = re.sub(r'^#{1,6}\s+', '', text, flags=re.MULTILINE)
+    # Gras/italique **text** ou __text__ → text
+    text = re.sub(r'\*\*(.+?)\*\*', r'\1', text)
+    text = re.sub(r'__(.+?)__', r'\1', text)
+    # Italique *text* ou _text_ → text
+    text = re.sub(r'\*(.+?)\*', r'\1', text)
+    text = re.sub(r'_(.+?)_', r'\1', text)
+    # Liens [texte](url) → texte
+    text = re.sub(r'\[([^\]]+)\]\([^\)]+\)', r'\1', text)
+    # Puces * - + en début de ligne → •
+    text = re.sub(r'^[\*\-\+]\s+', '• ', text, flags=re.MULTILINE)
+    # Numérotation 1. 2. → garder
+    # Supprimer les lignes de tableau Markdown (|----|)
+    text = re.sub(r'^\s*\|[-:\s|]+\|\s*$', '', text, flags=re.MULTILINE)
+    # Nettoyer les lignes vides multiples
+    text = re.sub(r'\n{3,}', '\n\n', text)
+    return text.strip()
+
+
+def clean(text: str, max_chars: int = 4000) -> str:
+    """Échappe les caractères XML spéciaux pour ReportLab."""
+    if not text:
+        return ''
     text = str(text)
     if len(text) > max_chars:
         text = text[:max_chars] + '…'
-    # Échapper les caractères XML spéciaux (sauf si déjà échappés)
     text = text.replace('&', '&amp;')
     text = text.replace('<', '&lt;').replace('>', '&gt;')
     return text
 
+
+def clean_md(text: str, max_chars: int = 4000) -> str:
+    """Strip Markdown PUIS échappe XML — pour les champs texte libre."""
+    return clean(strip_markdown(str(text or '')), max_chars)
+
+
 def para(text: str, style, max_chars: int = 4000) -> Paragraph:
-    """Crée un Paragraph robuste."""
+    """Crée un Paragraph robuste avec double fallback."""
     try:
         return Paragraph(clean(text, max_chars), style)
     except Exception:
@@ -106,8 +142,15 @@ def para(text: str, style, max_chars: int = 4000) -> Paragraph:
         except Exception:
             return Paragraph('(texte non affichable)', style)
 
+
+def para_md(text: str, style, max_chars: int = 4000) -> Paragraph:
+    """Paragraph avec strip Markdown préalable."""
+    return para(clean_md(text, max_chars), style, max_chars)
+
+
 def sp(h=6):
     return Spacer(1, h)
+
 
 def section_box(text: str) -> Table:
     return Table(
@@ -122,6 +165,7 @@ def section_box(text: str) -> Table:
         ])
     )
 
+
 def form_table(rows: list, col1_w: float = 168) -> Table:
     col2_w = CW - col1_w
     data = []
@@ -129,7 +173,7 @@ def form_table(rows: list, col1_w: float = 168) -> Table:
         bold = lbl_raw.startswith('**')
         lbl_txt = lbl_raw[2:] if bold else lbl_raw
         p_lbl = para(f'<b>{clean(lbl_txt)}</b>' if bold else clean(lbl_txt), S['lbl'])
-        p_val = para(str(val or ''), S['val'], max_chars=2000)
+        p_val = para(clean_md(str(val or ''), 2000), S['val'])
         data.append([p_lbl, p_val])
     ts = TableStyle([
         ('BOX',           (0, 0), (-1, -1), 0.5, BLACK),
@@ -143,9 +187,10 @@ def form_table(rows: list, col1_w: float = 168) -> Table:
     ])
     return Table(data, colWidths=[col1_w, col2_w], style=ts)
 
+
 def text_box(text: str, min_height: float = 60) -> Table:
     return Table(
-        [[para(str(text or ''), S['body'], max_chars=4000)]],
+        [[para_md(str(text or ''), S['body'], max_chars=4000)]],
         colWidths=[CW],
         style=TableStyle([
             ('BOX',           (0, 0), (-1, -1), 0.5, BLACK),
@@ -156,6 +201,7 @@ def text_box(text: str, min_height: float = 60) -> Table:
         ])
     )
 
+
 def fmt_eur(v) -> str:
     try:
         f = float(v or 0)
@@ -164,6 +210,7 @@ def fmt_eur(v) -> str:
         return f'{f:,.2f}'.replace(',', ' ').replace('.', ',') + ' €'
     except:
         return str(v)
+
 
 # ═══════════════════════════════════════════════════════════════════════════════
 # ANNEXE 1
@@ -174,7 +221,7 @@ def build_annexe1(project: dict, logo_bytes: bytes = None) -> bytes:
                          topMargin=MT + 70, bottomMargin=MB,
                          leftMargin=ML, rightMargin=MR)
     story = []
-    coord = project.get('coordinateur', {})
+    coord = project.get('coordinateur', {}) or {}
 
     # Titre
     story += [
@@ -186,7 +233,7 @@ def build_annexe1(project: dict, logo_bytes: bytes = None) -> bytes:
         sp(14),
     ]
 
-    # Section 1
+    # ── Section 1 ──────────────────────────────────────────────────────────────
     story.append(para('<b>1.  Identification précise du projet et de son porteur/ses porteurs</b>', S['h1']))
     story.append(sp(4))
 
@@ -206,26 +253,44 @@ def build_annexe1(project: dict, logo_bytes: bytes = None) -> bytes:
     story.append(section_box('B) Résumé (10 lignes maximum)'))
     story.append(sp(4))
     story.append(text_box(project.get('resume', ''), min_height=90))
-    story.append(para('<i>En cas de sélection, ce résumé sera publié sur le site internet de l\'INSPÉ Lille HdF dans la rubrique Recherche</i>', S['body_sm']))
+    story.append(para(
+        "<i>En cas de sélection, ce résumé sera publié sur le site internet de l'INSPÉ Lille HdF dans la rubrique Recherche</i>",
+        S['body_sm']))
     story.append(PageBreak())
 
     # C) Coordinateur
     story.append(section_box('C) Identification du porteur (coordinateur et unité de recherche) du projet'))
     story.append(sp(5))
-    story.append(para('<i>Le coordinateur du projet doit être membre d\'une unité de recherche des universités régionales du périmètre de l\'Académie de Lille (UArtois, ULCO, ULille, UPHF).</i>', S['body_it']))
+    story.append(para(
+        "<i>Le coordinateur du projet doit être membre d'une unité de recherche des universités régionales du périmètre de l'Académie de Lille (UArtois, ULCO, ULille, UPHF).</i>",
+        S['body_it']))
     story.append(sp(6))
+
+    ur_val = coord.get('ur_id', '')
+    ur_nom = coord.get('ur_nom', '')
+    ur_full = f"{ur_val} – {ur_nom}".strip(' –') if (ur_val or ur_nom) else ''
+
     story.append(form_table([
-        ('**Coordinateur\n(Nom, Prénom):',                coord.get('nom', '')),
-        ('Titre/Grade:',                                   coord.get('grade', '')),
-        ('Courriel:',                                      coord.get('email', '')),
-        ('Téléphone:',                                     coord.get('telephone', '')),
-        ('Institution de rattachement (Nom\net adresse):', coord.get('institution', '')),
-        ('**UR de rattachement\n(identifiant EA UMR, nom et\nadresse):',
-         f"{coord.get('ur_id', '')} – {coord.get('ur_nom', '')}".strip(' –')),
-        ("Directeur de l'UR (Nom, prénom\net courriel de contact):", coord.get('ur_directeur', '')),
-        ("Gestionnaire de l'UR (si\nApplicable - Nom, prénom,\ncourriel):", coord.get('ur_gestionnaire', '')),
-        ("Tutelle de gestion de l'UR pour ce\nprojet (Nom et adresse):", coord.get('ur_tutelle', '')),
-        ('**Autres membres de l\'UR impliqués\ndans le projet (Nom, prénom, titre,\ncourriel):', coord.get('membres', '')),
+        ('**Coordinateur\n(Nom, Prénom):',
+         coord.get('nom', '')),
+        ('Titre/Grade:',
+         coord.get('grade', '')),
+        ('Courriel:',
+         coord.get('email', '')),
+        ('Téléphone:',
+         coord.get('telephone', '')),
+        ('Institution de rattachement\n(Nom et adresse):',
+         coord.get('institution', '')),
+        ('**UR de rattachement\n(identifiant EA UMR, nom et adresse):',
+         ur_full),
+        ("Directeur de l'UR\n(Nom, prénom et courriel de contact):",
+         coord.get('ur_directeur', '')),
+        ("Gestionnaire de l'UR\n(si Applicable - Nom, prénom, courriel):",
+         coord.get('ur_gestionnaire', '')),
+        ("Tutelle de gestion de l'UR pour ce projet\n(Nom et adresse):",
+         coord.get('ur_tutelle', '')),
+        ('**Autres membres de l\'UR impliqués\ndans le projet\n(Nom, prénom, titre, courriel):',
+         coord.get('membres', '')),
     ]))
     story.append(sp(10))
 
@@ -237,13 +302,15 @@ def build_annexe1(project: dict, logo_bytes: bytes = None) -> bytes:
         story.append(para(f'<i>Partenaire n° {i + 1}</i>', S['body_it']))
         story.append(sp(3))
         story.append(form_table([
-            ('**Identité (Nom et statut)\nUnité de recherche, école,\nétablissement, …:', p.get('nom', '')),
-            ('Coordonnées:',                p.get('coordonnees', '')),
+            ('**Identité (Nom et statut)\nUnité de recherche, école, établissement, …:',
+             p.get('nom', '')),
+            ('Coordonnées:',               p.get('coordonnees', '')),
             ("Expertise(s) du partenaire:", p.get('expertise', '')),
             ('**Contact partenaire porteur\n(Nom, prénom):', p.get('contact', '')),
             ('Titre / grade / fonction:',   p.get('titre_contact', '')),
             ('Courriel:',                   p.get('email_contact', '')),
-            ('**Autres membres du partenaire impliqués\ndans le projet:', p.get('membres_partenaire', '')),
+            ('**Autres membres du partenaire impliqués\ndans le projet:',
+             p.get('membres_partenaire', '')),
         ]))
         story.append(sp(5))
         story.append(para("<i>Préciser l'état actuel du partenariat :</i>", S['body_it']))
@@ -251,15 +318,24 @@ def build_annexe1(project: dict, logo_bytes: bytes = None) -> bytes:
         story.append(sp(8))
     story.append(PageBreak())
 
-    # E) Publications
+    # E) Publications — strip Markdown, rendu ligne par ligne
     story.append(section_box('E) Références équipe projet : porteur et partenaire(s)'))
     story.append(sp(4))
     story.append(para("5 publications maximum du porteur et de l'équipe projet dans le domaine :", S['body']))
-    pub = str(project.get('publications', '') or '')
-    story.append(text_box(pub, min_height=max(10, 60 - len(pub) // 10)))
+    story.append(sp(4))
+    pub_raw = str(project.get('publications', '') or '')
+    pub_clean = strip_markdown(pub_raw)
+    for line in pub_clean.split('\n'):
+        stripped = line.strip()
+        if stripped.startswith('• '):
+            story.append(para(f'• {clean(stripped[2:])}', S['body']))
+        elif stripped:
+            story.append(para(clean(stripped), S['body']))
+        else:
+            story.append(sp(3))
     story.append(sp(12))
 
-    # Section 2 : Description
+    # ── Section 2 : Description ────────────────────────────────────────────────
     story.append(para('<b>2. Description du projet</b> (3 pages maximum)', S['h1']))
     story.append(para('<i>Faisant apparaître :</i>', S['body_it']))
     for hint in [
@@ -268,29 +344,29 @@ def build_annexe1(project: dict, logo_bytes: bytes = None) -> bytes:
         "- Objectifs précis visés par le projet",
         "- Cadre(s) théorique(s), méthodologie(s) et sources employées",
         "- Résultats attendus",
-        "- Modalités pratiques de restitution, de valorisation et de diffusion des résultats (notamment auprès des publics de l'INSPÉ Lille HdF) - livrables",
+        "- Modalités pratiques de restitution, de valorisation et de diffusion des résultats"
+        " (notamment auprès des publics de l'INSPÉ Lille HdF) - livrables",
         "- Brève revue de la littérature existante",
     ]:
         story.append(para(hint, S['body']))
     story.append(sp(5))
 
-    desc = str(project.get('description', '') or '')
-    for line in desc.split('\n'):
+    desc_raw = str(project.get('description', '') or '')
+    desc_clean = strip_markdown(desc_raw)
+    for line in desc_clean.split('\n'):
         stripped = line.strip()
-        if stripped.startswith('## '):
-            story.append(para(f'<b>{clean(stripped[3:])}</b>', S['body']))
-        elif stripped.startswith('# '):
-            story.append(para(f'<b>{clean(stripped[2:])}</b>', S['h1']))
-        elif stripped.startswith('• ') or stripped.startswith('* '):
+        if stripped.startswith('• '):
             story.append(para(f'• {clean(stripped[2:])}', S['body']))
         elif stripped:
-            story.append(para(stripped, S['body']))
+            story.append(para(clean(stripped), S['body']))
         else:
             story.append(sp(3))
     story.append(sp(10))
 
-    # Section 3 : Calendrier
-    story.append(para('<b>3. Grandes étapes et calendrier prévisionnel</b> des tâches, livrables et jalons de réalisation du projet (1 page maximum)', S['h1']))
+    # ── Section 3 : Calendrier ─────────────────────────────────────────────────
+    story.append(para(
+        '<b>3. Grandes étapes et calendrier prévisionnel</b> des tâches, livrables et jalons de réalisation du projet (1 page maximum)',
+        S['h1']))
 
     cal = project.get('calendrier', [])
     if isinstance(cal, str):
@@ -299,8 +375,13 @@ def build_annexe1(project: dict, logo_bytes: bytes = None) -> bytes:
         for l in lines[1:]:
             cells = [c.strip() for c in l.split('|') if c.strip()]
             if len(cells) >= 4:
-                cal.append({'etape': cells[0], 'debut': cells[1], 'fin': cells[2],
-                            'duree': cells[3], 'livrables': cells[4] if len(cells) > 4 else ''})
+                cal.append({
+                    'etape':     cells[0],
+                    'debut':     cells[1],
+                    'fin':       cells[2],
+                    'duree':     cells[3],
+                    'livrables': cells[4] if len(cells) > 4 else '',
+                })
 
     cal_rows = [[
         para('<b>Grandes étapes</b>', S['lbl_bold']),
@@ -311,11 +392,11 @@ def build_annexe1(project: dict, logo_bytes: bytes = None) -> bytes:
     ]]
     for r in (cal or []):
         cal_rows.append([
-            para(str(r.get('etape', '')), S['lbl']),
-            para(str(r.get('debut', '')), S['lbl']),
-            para(str(r.get('fin', '')),   S['lbl']),
-            para(str(r.get('duree', '')), S['lbl']),
-            para(str(r.get('livrables', '')), S['lbl'], max_chars=500),
+            para(clean(str(r.get('etape', ''))),     S['lbl']),
+            para(clean(str(r.get('debut', ''))),     S['lbl']),
+            para(clean(str(r.get('fin', ''))),       S['lbl']),
+            para(clean(str(r.get('duree', ''))),     S['lbl']),
+            para(clean(str(r.get('livrables', '')), 500), S['lbl']),
         ])
     while len(cal_rows) < 9:
         cal_rows.append([para('', S['lbl'])] * 5)
@@ -332,7 +413,7 @@ def build_annexe1(project: dict, logo_bytes: bytes = None) -> bytes:
     ])))
     story.append(PageBreak())
 
-    # Section 4 : Budget
+    # ── Section 4 : Budget ─────────────────────────────────────────────────────
     story.append(para('<b>4. Budget prévisionnel et demande financière</b>', S['h1']))
     story.append(para("Voir Annexe 1bis (tableau joint).", S['body']))
     story.append(sp(8))
@@ -344,16 +425,16 @@ def build_annexe1(project: dict, logo_bytes: bytes = None) -> bytes:
         story.append(para(fin_label, S['body']))
         fin = project.get(fin_key) or {}
         story.append(form_table([
-            ('Type de financement',    fin.get('type', '')),
-            ('Nom du financeur',       fin.get('financeur', '')),
+            ('Type de financement',       fin.get('type', '')),
+            ('Nom du financeur',          fin.get('financeur', '')),
             ('Dispositif de financement', fin.get('dispositif', '')),
-            ('Montant',                fin.get('montant', '')),
-            ('Dépenses éligibles',     fin.get('eligibles', '')),
+            ('Montant',                   fin.get('montant', '')),
+            ('Dépenses éligibles',        fin.get('eligibles', '')),
         ]))
         story.append(sp(6))
     story.append(PageBreak())
 
-    # Établissement
+    # ── Établissement ──────────────────────────────────────────────────────────
     story.append(section_box("C) Établissement qui assurera la gestion financière du projet"))
     story.append(sp(5))
     etab = project.get('etablissement') or {}
@@ -388,7 +469,7 @@ def build_annexe1(project: dict, logo_bytes: bytes = None) -> bytes:
     ]))
     story.append(sp(12))
 
-    # Section 5 : Appui
+    # ── Section 5 : Appui ──────────────────────────────────────────────────────
     story.append(para("<b>5. Demande complémentaire d'appui ou d'accompagnement par l'INSPÉ Lille HdF</b>", S['h1']))
     story.append(text_box(project.get('demande_appui', ''), min_height=60))
     story.append(sp(16))
@@ -423,6 +504,9 @@ def build_annexe1bis(project: dict, budget_lines: list, logo_bytes: bytes = None
                          leftMargin=ML, rightMargin=MR)
     story = []
 
+    coord = project.get('coordinateur', {}) or {}
+    porteur = coord.get('nom', project.get('porteur', ''))
+
     story += [
         sp(10),
         para('<b>AAP 2026 pour projet 2027 et 2028 - Annexe 1 bis : tableau des dépenses</b>', S['title']),
@@ -431,7 +515,7 @@ def build_annexe1bis(project: dict, budget_lines: list, logo_bytes: bytes = None
         sp(4),
         para(f"<b>Titre du projet:</b>  {clean(project.get('titre', ''))}", S['body']),
         sp(3),
-        para(f"<b>Nom et prénom du porteur :</b>  {clean(project.get('porteur', ''))}", S['body']),
+        para(f"<b>Nom et prénom du porteur :</b>  {clean(porteur)}", S['body']),
         sp(8),
     ]
 
@@ -443,11 +527,11 @@ def build_annexe1bis(project: dict, budget_lines: list, logo_bytes: bytes = None
         ],
         colWidths=[CW],
         style=TableStyle([
-            ('BOX',         (0, 0), (-1, -1), 0.3, COL_BLEU_NOTE),
-            ('BACKGROUND',  (0, 0), (-1, -1), colors.Color(0.94, 0.96, 1.0)),
-            ('TOPPADDING',  (0, 0), (-1, -1), 3),
-            ('BOTTOMPADDING',(0,0), (-1, -1), 3),
-            ('LEFTPADDING', (0, 0), (-1, -1), 6),
+            ('BOX',          (0, 0), (-1, -1), 0.3, COL_BLEU_NOTE),
+            ('BACKGROUND',   (0, 0), (-1, -1), colors.Color(0.94, 0.96, 1.0)),
+            ('TOPPADDING',   (0, 0), (-1, -1), 3),
+            ('BOTTOMPADDING',(0, 0), (-1, -1), 3),
+            ('LEFTPADDING',  (0, 0), (-1, -1), 6),
         ])
     ))
     story.append(sp(8))
@@ -460,8 +544,8 @@ def build_annexe1bis(project: dict, budget_lines: list, logo_bytes: bytes = None
     def cb(txt): return para(f'<b>{str(txt or "")}</b>', S['tbl_total'])
 
     row1 = [
-        h('NATURE DE LA DEPENSE\n(missions, prestations, frais de\nréception, vacations, gratification\nde stage, organisation séminaire,\ncolloque, journées d\'étude,\nmatériel consommable utile au\nprojet de recherche, ...)'),
-        h('DETAIL\n(type de prestation, nombre\nd\'entretiens et d\'heures\nà retranscrire…)'),
+        h("NATURE DE LA DEPENSE\n(missions, prestations, frais de\nréception, vacations, gratification\nde stage, organisation séminaire,\ncolloque, journées d'étude,\nmatériel consommable utile au\nprojet de recherche, ...)"),
+        h("DETAIL\n(type de prestation, nombre\nd'entretiens et d'heures\nà retranscrire…)"),
         h('TOTAL\nTTC\n(en\neuros)'),
         h("Aide demandée à l'INSPÉ Lille HdF TTC (en euros)"),
         '', '', '', '',
@@ -482,8 +566,8 @@ def build_annexe1bis(project: dict, budget_lines: list, logo_bytes: bytes = None
         r28 = float(line.get('rh2028', 0) or 0)
         cof = float(line.get('cofinancement', 0) or 0)
         ins = f27 + r27 + f28 + r28
-        totals['total'] += t; totals['f27'] += f27; totals['r27'] += r27
-        totals['f28'] += f28; totals['r28'] += r28; totals['ins'] += ins; totals['cof'] += cof
+        totals['total'] += t;  totals['f27'] += f27; totals['r27'] += r27
+        totals['f28']   += f28; totals['r28'] += r28; totals['ins'] += ins; totals['cof'] += cof
         bdata.append([
             c(line.get('nature', '')),
             c(line.get('detail', '')),
@@ -514,7 +598,7 @@ def build_annexe1bis(project: dict, budget_lines: list, logo_bytes: bytes = None
     N = len(bdata)
     HDR = 3
     DATA_END = N - 2
-    TOT_ROW = N - 1
+    TOT_ROW  = N - 1
 
     ts = TableStyle([
         ('BOX',        (0, 0), (-1, -1), 0.5, BLACK),
@@ -531,7 +615,7 @@ def build_annexe1bis(project: dict, budget_lines: list, logo_bytes: bytes = None
         ('BACKGROUND', (0, TOT_ROW), (-1, TOT_ROW), COL_TOTAL_ROW),
         ('VALIGN',     (0, 0), (-1, -1), 'MIDDLE'),
         ('ALIGN',      (2, 0), (-1, -1), 'CENTER'),
-        ('TOPPADDING', (0, 0), (-1, -1), 2),
+        ('TOPPADDING',    (0, 0), (-1, -1), 2),
         ('BOTTOMPADDING', (0, 0), (-1, -1), 2),
         ('LEFTPADDING',   (0, 0), (-1, -1), 3),
         ('RIGHTPADDING',  (0, 0), (-1, -1), 3),
