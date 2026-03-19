@@ -901,3 +901,79 @@ JSON :"""
     except Exception as e:
         traceback.print_exc()
         return jsonify({"error": str(e)}), 500
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# PDF DEVIS
+# ══════════════════════════════════════════════════════════════════════════════
+
+try:
+    from generate_devis import generate_devis_pdf
+    DEVIS_OK = True
+except ImportError as e:
+    DEVIS_OK = False
+    print(f"WARNING: generate_devis non trouvé: {e}")
+
+
+@app.route("/generate-devis", methods=["POST"])
+def generate_devis():
+    """
+    Génère le PDF d'un devis.
+    Corps : { emetteur, client, devis, lignes, totaux }
+    """
+    if not DEVIS_OK:
+        return jsonify({"error": "Module generate_devis non disponible"}), 503
+    try:
+        data   = request.get_json(force=True) or {}
+        pdf    = generate_devis_pdf(data)
+        dv     = data.get("devis", {})
+        cl     = data.get("client", {})
+        numero = dv.get("numero", "devis").replace(" ", "-").replace("/", "-")
+        client = cl.get("nom", "client")[:20].replace(" ", "-")
+        return send_file(
+            io.BytesIO(pdf),
+            mimetype="application/pdf",
+            as_attachment=True,
+            download_name=f"Devis-{numero}-{client}.pdf",
+        )
+    except Exception as e:
+        traceback.print_exc()
+        return jsonify({"error": str(e)}), 500
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# PDF ORDRE DE MISSION
+# ══════════════════════════════════════════════════════════════════════════════
+
+try:
+    from generate_ordre_mission import generate_ordre_mission_pdf
+    MISSION_OK = True
+except ImportError as e:
+    MISSION_OK = False
+    print(f"WARNING: generate_ordre_mission non trouvé: {e}")
+
+
+@app.route("/generate-ordre-mission", methods=["POST"])
+def generate_ordre_mission():
+    """
+    Génère le PDF de la demande d'autorisation de déplacement.
+    Corps : { missionnaire, mission, transport, frais, etranger }
+    """
+    if not MISSION_OK:
+        return jsonify({"error": "Module generate_ordre_mission non disponible"}), 503
+    try:
+        data = request.get_json(force=True) or {}
+        pdf  = generate_ordre_mission_pdf(data)
+        mis  = data.get("missionnaire", {})
+        nom  = mis.get("nom", "mission").replace(" ", "-").lower()
+        msn  = data.get("mission", {})
+        date = str(msn.get("date_debut", ""))[:10].replace("-", "")
+        return send_file(
+            io.BytesIO(pdf),
+            mimetype="application/pdf",
+            as_attachment=True,
+            download_name=f"OrdeMission-{nom}-{date}.pdf",
+        )
+    except Exception as e:
+        traceback.print_exc()
+        return jsonify({"error": str(e)}), 500
