@@ -323,36 +323,55 @@ def ai_extraire_infos():
 # IA — REMPLIR UN DOCUMENT ADMINISTRATIF (.docx)
 # ══════════════════════════════════════════════════════════════════════════════
 
+def _fusionner_runs(para):
+    """
+    Fusionne tous les runs d'un paragraphe en un seul pour faciliter
+    les remplacements. Conserve le formatage du premier run.
+    """
+    if len(para.runs) <= 1:
+        return
+    texte_complet = para.text
+    if not texte_complet.strip():
+        return
+    # Mettre tout le texte dans le premier run, vider les autres
+    para.runs[0].text = texte_complet
+    for run in para.runs[1:]:
+        run.text = ""
+
+
+def _remplacer_dans_para(para, ancien, nouveau):
+    """Remplace une chaîne dans un paragraphe, en fusionnant les runs si nécessaire."""
+    if ancien not in para.text:
+        return False
+    # Essai direct sur les runs existants
+    for run in para.runs:
+        if ancien in run.text:
+            run.text = run.text.replace(ancien, nouveau)
+            return True
+    # Fusionner les runs puis remplacer
+    _fusionner_runs(para)
+    for run in para.runs:
+        if ancien in run.text:
+            run.text = run.text.replace(ancien, nouveau)
+            return True
+    return False
+
+
 def _appliquer_remplacements(doc, remplacements: dict):
-    """Remplace les chaînes dans tous les paragraphes et tableaux."""
+    """Remplace les chaînes dans tous les paragraphes et tableaux.
+    Fusionne les runs si nécessaire pour que les substitutions fonctionnent."""
     for ancien, nouveau in remplacements.items():
         if not isinstance(ancien, str) or not isinstance(nouveau, str):
             continue
+        # Paragraphes directs
         for para in doc.paragraphs:
-            if ancien in para.text:
-                for run in para.runs:
-                    if ancien in run.text:
-                        run.text = run.text.replace(ancien, nouveau)
-                        break
-                else:
-                    if para.runs:
-                        para.runs[0].text = para.text.replace(ancien, nouveau)
-                        for run in para.runs[1:]:
-                            run.text = ""
+            _remplacer_dans_para(para, ancien, nouveau)
+        # Paragraphes dans les tableaux
         for table in doc.tables:
             for row in table.rows:
                 for cell in row.cells:
                     for para in cell.paragraphs:
-                        if ancien in para.text:
-                            for run in para.runs:
-                                if ancien in run.text:
-                                    run.text = run.text.replace(ancien, nouveau)
-                                    break
-                            else:
-                                if para.runs:
-                                    para.runs[0].text = para.text.replace(ancien, nouveau)
-                                    for run in para.runs[1:]:
-                                        run.text = ""
+                        _remplacer_dans_para(para, ancien, nouveau)
 
 
 def _fallback_remplacements(profil: dict) -> dict:
@@ -369,10 +388,32 @@ def _fallback_remplacements(profil: dict) -> dict:
     }
 
 
+def _convert_doc_to_docx(doc_bytes: bytes, nom_fich: str) -> bytes:
+    """Convertit un .doc en .docx via LibreOffice headless."""
+    import subprocess, tempfile, glob
+    with tempfile.TemporaryDirectory() as tmpdir:
+        input_path = os.path.join(tmpdir, nom_fich)
+        with open(input_path, "wb") as f:
+            f.write(doc_bytes)
+        result = subprocess.run(
+            ["libreoffice", "--headless", "--convert-to", "docx",
+             "--outdir", tmpdir, input_path],
+            capture_output=True, text=True, timeout=60
+        )
+        if result.returncode != 0:
+            raise RuntimeError(f"LibreOffice erreur: {result.stderr}")
+        docx_files = glob.glob(os.path.join(tmpdir, "*.docx"))
+        if not docx_files:
+            raise RuntimeError("Conversion LibreOffice : aucun .docx produit")
+        with open(docx_files[0], "rb") as f:
+            return f.read()
+
+
 @app.route("/ai/remplir-document", methods=["POST"])
 def ai_remplir_document():
     """
-    Reçoit un DOCX en base64 + le profil utilisateur.
+    Reçoit un DOC ou DOCX en base64 + le profil utilisateur.
+    Convertit automatiquement les .doc en .docx via LibreOffice.
     Claude repère tous les champs vides et les remplit avec le profil.
     Retourne le DOCX complété.
     """
@@ -389,7 +430,24 @@ def ai_remplir_document():
         if not b64:
             return jsonify({"error": "fichier_base64 manquant"}), 400
 
-        docx_bytes = base64.b64decode(b64)
+        raw_bytes = base64.b64decode(b64)
+
+        # ── Conversion automatique .doc → .docx ──────────────────────────────
+        ext = os.path.splitext(nom_fich)[1].lower()
+        if ext == ".doc":
+            print(f"Conversion .doc → .docx : {nom_fich}")
+            try:
+                docx_bytes = _convert_doc_to_docx(raw_bytes, nom_fich)
+                nom_fich   = os.path.splitext(nom_fich)[0] + ".docx"
+            except Exception as conv_err:
+                print(f"WARNING: Conversion échouée: {conv_err}")
+                return jsonify({
+                    "error": "Conversion .doc impossible. "
+                             "Ouvrez le fichier dans Word et enregistrez-le en .docx."
+                }), 422
+        else:
+            docx_bytes = raw_bytes
+
         doc = DocxDoc(io.BytesIO(docx_bytes))
 
         # Extraire le texte brut
@@ -404,36 +462,56 @@ def ai_remplir_document():
                         texte_doc.append(cell.text)
         texte_brut = "\n".join(texte_doc)[:5000]
 
+        # ── Extraire les paragraphes champ par champ ──────────────────────────
+        # Construire un mapping : texte_para → para_index pour chaque cellule
+        champs_doc = []
+        for para in doc.paragraphs:
+            if para.text.strip():
+                champs_doc.append({"texte": para.text, "source": "para"})
+        for ti, table in enumerate(doc.tables):
+            for ri, row in enumerate(table.rows):
+                for ci, cell in enumerate(row.cells):
+                    for pi, para in enumerate(cell.paragraphs):
+                        if para.text.strip():
+                            champs_doc.append({
+                                "texte": para.text,
+                                "source": f"table_{ti}_{ri}_{ci}_{pi}"
+                            })
+
+        # Limiter à 5000 chars
+        champs_str = "\n".join(
+            f"[{i}] {c['texte']}" for i, c in enumerate(champs_doc)
+        )[:5000]
+
         system = (
             "Tu es un assistant expert en administration française. "
             "Tu analyses des documents administratifs et identifies "
-            "les valeurs exactes à insérer pour chaque champ vide. "
+            "les champs à remplir. "
             "Tu retournes UNIQUEMENT un objet JSON valide, "
             "sans texte avant ni après, sans balises markdown."
         )
 
-        user = f"""Voici le texte d'un document administratif français à compléter :
+        user = f"""Voici les lignes d'un document administratif numérotées :
 
-{texte_brut}
+{champs_str}
 
 Voici le profil de la personne :
 {json.dumps(profil, ensure_ascii=False, indent=2)}
 
-Retourne un objet JSON où chaque clé est le texte EXACT à remplacer
-dans le document (copié mot pour mot depuis le document),
-et la valeur est ce qu'il faut mettre à la place.
+Pour chaque ligne qui contient un champ vide (avec des ……, des □, ou du texte à compléter),
+retourne un JSON avec :
+- clé = le numéro de ligne entre crochets (ex: "3")
+- valeur = le texte COMPLET de la ligne tel qu'il doit apparaître après remplissage
 
-Règles :
-- Copie exactement les chaînes à remplacer (avec les pointillés, etc.)
-- Pour les cases □, remplace □ par ☑ pour la bonne case
-- Ne remplis que les champs pour lesquels tu as l'information
+Ne retourne que les lignes à modifier. Pour les cases à cocher □,
+coche la bonne case avec ☑ et laisse les autres □.
 
-Exemple :
+Exemple de réponse :
 {{
-  "Nom d'usage : ………………………………………………………." : "Nom d'usage : DUPONT",
-  "Prénom(s) : ……………………………………………………" : "Prénom(s) : Marie",
-  "Né(e) le : …….../…..…../…..….." : "Né(e) le : 15/03/1985",
-  "□ Travailleur non-salarié" : "☑ Travailleur non-salarié"
+  "4": "Nom d'usage : DUPONT",
+  "8": "Prénom(s) : Marie",
+  "10": "Né(e) le : 06/10/2001 à Toulouse",
+  "15": "☑ Travailleur non-salarié"
 }}
 
 JSON :"""
@@ -448,13 +526,45 @@ JSON :"""
         raw = raw.strip()
 
         try:
-            remplacements = json.loads(raw)
+            index_map = json.loads(raw)
         except json.JSONDecodeError:
-            print(f"WARNING: fallback remplacements (JSON invalide)")
-            remplacements = _fallback_remplacements(profil)
+            print(f"WARNING: JSON invalide de Claude, utilisation fallback")
+            index_map = {}
 
+        # ── Appliquer par index de paragraphe ─────────────────────────────────
         doc_out = DocxDoc(io.BytesIO(docx_bytes))
-        _appliquer_remplacements(doc_out, remplacements)
+
+        # Reconstruire la même liste ordonnée sur doc_out
+        paras_out = []
+        for para in doc_out.paragraphs:
+            if para.text.strip():
+                paras_out.append(para)
+        for ti, table in enumerate(doc_out.tables):
+            for ri, row in enumerate(table.rows):
+                for ci, cell in enumerate(row.cells):
+                    for pi, para in enumerate(cell.paragraphs):
+                        if para.text.strip():
+                            paras_out.append(para)
+
+        for idx_str, nouveau_texte in index_map.items():
+            try:
+                idx = int(idx_str)
+                if 0 <= idx < len(paras_out):
+                    para = paras_out[idx]
+                    _fusionner_runs(para)
+                    if para.runs:
+                        para.runs[0].text = nouveau_texte
+                    else:
+                        # Pas de run : ajouter un nouveau
+                        from docx.oxml.ns import qn
+                        from docx.oxml import OxmlElement
+                        r = OxmlElement('w:r')
+                        t = OxmlElement('w:t')
+                        t.text = nouveau_texte
+                        r.append(t)
+                        para._p.append(r)
+            except (ValueError, IndexError) as e:
+                print(f"WARNING: index {idx_str} invalide: {e}")
 
         buf = io.BytesIO()
         doc_out.save(buf)
