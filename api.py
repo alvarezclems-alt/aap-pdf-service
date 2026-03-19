@@ -751,3 +751,153 @@ if __name__ == "__main__":
     print(f"Démarrage sur port {port}")
     print(f"  Claude:{CLAUDE_OK} | Annexes:{ANNEXES_OK} | Vacataire:{VACATAIRE_OK} | Docx:{DOCX_OK}")
     app.run(host="0.0.0.0", port=port, debug=False)
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# IA — ANALYSER UN DOCUMENT ET IDENTIFIER LES CHAMPS MANQUANTS
+# ══════════════════════════════════════════════════════════════════════════════
+
+@app.route("/ai/analyser-document", methods=["POST"])
+def ai_analyser_document():
+    """
+    Analyse un document et identifie les champs personnels à remplir.
+    Compare avec le profil existant pour ne demander que ce qui manque.
+
+    Corps attendu :
+    {
+      "texte_document": "texte extrait du document",
+      "profil_existant": {
+        "nom": "...", "prenom": "...", "email": "...", ...
+      }
+    }
+
+    Réponse :
+    {
+      "champs_manquants": [
+        { "id": "num_secu", "label": "N° de sécurité sociale",
+          "type": "texte", "exemple": "1 85 03 75 056 789 42" },
+        { "id": "situation_famille", "label": "Situation familiale",
+          "type": "choix",
+          "options": ["Célibataire", "Marié(e)", "Pacsé(e)", "Divorcé(e)", "Veuf/Veuve"] }
+      ],
+      "champs_trouves": ["nom", "prenom", "email", "adresse"]
+    }
+    """
+    if not CLAUDE_OK:
+        return jsonify({"error": "Service Claude non disponible"}), 503
+    raw = ""
+    try:
+        d      = request.get_json(force=True) or {}
+        texte  = d.get("texte_document", "")
+        profil = d.get("profil_existant", {})
+
+        if not texte:
+            return jsonify({"error": "texte_document manquant"}), 400
+
+        # Déterminer quels champs du profil sont déjà renseignés
+        champs_profil_renseignes = {
+            k: v for k, v in profil.items()
+            if v and str(v).strip() not in ("", "null", "None")
+        }
+
+        system = (
+            "Tu es un assistant administratif expert. "
+            "Tu analyses des documents administratifs français et identifies "
+            "les champs personnels qui doivent être remplis. "
+            "Tu retournes UNIQUEMENT un objet JSON valide, "
+            "sans texte avant ni après, sans balises markdown."
+        )
+
+        user = f"""Voici le texte d'un document administratif à remplir :
+
+{texte[:4000]}
+
+Voici les informations déjà disponibles dans le profil de l'utilisateur :
+{json.dumps(champs_profil_renseignes, ensure_ascii=False, indent=2)}
+
+Identifie tous les champs personnels présents dans ce document.
+Pour chaque champ, indique s'il est déjà disponible dans le profil.
+
+Retourne ce JSON :
+{{
+  "champs_manquants": [
+    {{
+      "id": "identifiant_snake_case",
+      "label": "Libellé clair pour l'utilisateur",
+      "type": "texte" ou "choix" ou "date",
+      "exemple": "exemple de valeur (optionnel)",
+      "options": ["opt1", "opt2"]
+    }}
+  ],
+  "champs_trouves": ["liste des champs déjà disponibles dans le profil"]
+}}
+
+Champs personnels à détecter dans le document :
+- nom (nom d'usage)
+- prenom
+- nom_naissance (nom de naissance / nom patronymique)
+- date_naissance
+- lieu_naissance
+- departement_naissance
+- pays_naissance
+- nationalite
+- adresse
+- code_postal
+- ville
+- telephone_domicile
+- telephone_portable
+- email
+- num_secu (numéro de sécurité sociale)
+- iban
+- bic
+- siret
+- situation_famille (Célibataire/Marié(e)/Pacsé(e)/Divorcé(e)/Veuf/Concubinage)
+- situation_pro (secteur public/privé/indépendant/retraité/étudiant)
+- employeur_nom
+- employeur_adresse
+
+Pour "situation_famille", utilise type "choix" avec options :
+["Célibataire", "Marié(e)", "Pacsé(e)", "Divorcé(e)", "Veuf/Veuve", "Concubinage"]
+
+Pour "situation_pro", utilise type "choix" avec options :
+["Secteur public", "Secteur privé salarié", "Travailleur non-salarié / Auto-entrepreneur", "Intermittent du spectacle", "Étudiant(e) 3ème cycle", "Retraité(e)"]
+
+Ne liste dans champs_manquants QUE les champs présents dans le document
+ET absents (ou vides) dans le profil fourni.
+
+JSON :"""
+
+        raw = claude_text(system, user, max_tokens=1500)
+        raw = raw.strip()
+        if raw.startswith("```"):
+            parts = raw.split("```")
+            raw = parts[1] if len(parts) > 1 else raw
+            if raw.startswith("json"):
+                raw = raw[4:]
+        raw = raw.strip()
+
+        result = json.loads(raw)
+
+        # S'assurer que les deux clés sont présentes
+        if "champs_manquants" not in result:
+            result["champs_manquants"] = []
+        if "champs_trouves" not in result:
+            result["champs_trouves"] = list(champs_profil_renseignes.keys())
+
+        return jsonify(result)
+
+    except json.JSONDecodeError as e:
+        print(f"WARNING: JSON invalide de Claude: {raw[:200]}")
+        # Fallback : retourner les champs les plus courants comme manquants
+        return jsonify({
+            "champs_manquants": [
+                {"id": "num_secu",          "label": "N° de sécurité sociale",  "type": "texte", "exemple": "1 85 03 75 056 789 42"},
+                {"id": "iban",              "label": "IBAN",                      "type": "texte", "exemple": "FR76 1234 5678 9012 3456 7890 123"},
+                {"id": "situation_famille", "label": "Situation familiale",        "type": "choix",
+                 "options": ["Célibataire", "Marié(e)", "Pacsé(e)", "Divorcé(e)", "Veuf/Veuve", "Concubinage"]},
+            ],
+            "champs_trouves": list(profil.keys())
+        })
+    except Exception as e:
+        traceback.print_exc()
+        return jsonify({"error": str(e)}), 500
