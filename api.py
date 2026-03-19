@@ -1,6 +1,6 @@
 """
 api.py — Service Railway complet DocAdmin
-PDF AAP + PDF Vacataire + IA Claude + Remplissage de documents administratifs
+PDF AAP + PDF Vacataire + IA Claude + Remplissage + Révision de documents
 """
 import io, os, json, traceback, base64
 from flask import Flask, request, jsonify, send_file
@@ -73,6 +73,7 @@ def health():
             "POST /ai/justification-vacataire",
             "POST /ai/generer-section-aap",
             "POST /ai/reviser-section",
+            "POST /ai/reviser-document",
             "POST /ai/extraire-infos",
             "POST /ai/remplir-document",
         ]
@@ -254,7 +255,7 @@ Justification :""",
 
 
 # ══════════════════════════════════════════════════════════════════════════════
-# IA — RÉVISER UNE SECTION
+# IA — RÉVISER UNE SECTION (champ texte)
 # ══════════════════════════════════════════════════════════════════════════════
 
 @app.route("/ai/reviser-section", methods=["POST"])
@@ -274,6 +275,126 @@ Texte original :
 {d.get('texte_original', '')}
 Texte révisé :"""
         return jsonify({"texte": claude_text(system, user, 1500)})
+    except Exception as e:
+        traceback.print_exc()
+        return jsonify({"error": str(e)}), 500
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# IA — RÉVISER UN DOCUMENT AAP COMPLET (chat)
+# ══════════════════════════════════════════════════════════════════════════════
+
+@app.route("/ai/reviser-document", methods=["POST"])
+def ai_reviser_document():
+    """
+    Révise un document AAP complet via chat.
+    Conserve l'historique de conversation pour les modifications successives.
+
+    Corps attendu :
+    {
+      "texte_document": "texte complet du document",
+      "instruction": "message de l'utilisateur",
+      "historique": [
+        {"role": "user", "content": "..."},
+        {"role": "assistant", "content": "..."}
+      ],
+      "projet": { "titre": "...", "description": "..." }
+    }
+
+    Réponse :
+    {
+      "reponse": "Résumé des modifications pour l'utilisateur",
+      "texte_modifie": "Texte complet du document modifié"
+    }
+    """
+    if not CLAUDE_OK:
+        return jsonify({"error": "Service Claude non disponible"}), 503
+    try:
+        d           = request.get_json(force=True) or {}
+        texte       = d.get("texte_document", "")
+        instruction = d.get("instruction", "")
+        historique  = d.get("historique", [])
+        projet      = d.get("projet", {})
+
+        if not texte:
+            return jsonify({"error": "texte_document manquant"}), 400
+        if not instruction:
+            return jsonify({"error": "instruction manquante"}), 400
+
+        system = (
+            "Tu es un assistant expert en rédaction de dossiers de candidature "
+            "pour des appels à projets de recherche en éducation français. "
+            "Quand on te demande de modifier un document, tu appliques les "
+            "changements demandés avec précision et tu retournes le texte "
+            "complet du document modifié. "
+            "Tu rédiges uniquement en français. "
+            "Tu retournes UNIQUEMENT un objet JSON valide, "
+            "sans texte avant ni après, sans balises markdown."
+        )
+
+        # Construire les messages avec l'historique (6 derniers max)
+        messages = []
+        for msg in historique[-6:]:
+            role    = msg.get("role", "user")
+            content = msg.get("content", "")
+            if role in ("user", "assistant") and content:
+                messages.append({"role": role, "content": content})
+
+        # Message courant
+        messages.append({
+            "role": "user",
+            "content": f"""Voici le document AAP actuel :
+
+---
+{texte[:8000]}
+---
+
+Projet : {projet.get('titre', '')}
+Description : {projet.get('description', '')[:500]}
+
+Instruction de modification : {instruction}
+
+Applique cette modification et retourne un JSON avec exactement ces deux clés :
+{{
+  "reponse": "Résumé clair en 2-3 lignes des modifications apportées",
+  "texte_modifie": "Texte COMPLET du document après modification (conserve toute la structure)"
+}}
+
+JSON :"""
+        })
+
+        response = claude.messages.create(
+            model=CLAUDE_MODEL,
+            max_tokens=4000,
+            system=system,
+            messages=messages
+        )
+
+        raw = response.content[0].text.strip()
+
+        # Nettoyer les éventuelles balises markdown
+        if raw.startswith("```"):
+            parts = raw.split("```")
+            raw = parts[1] if len(parts) > 1 else raw
+            if raw.startswith("json"):
+                raw = raw[4:]
+        raw = raw.strip()
+
+        try:
+            result = json.loads(raw)
+            # S'assurer que les deux clés sont présentes
+            if "reponse" not in result:
+                result["reponse"] = "Document modifié avec succès."
+            if "texte_modifie" not in result:
+                result["texte_modifie"] = texte
+            return jsonify(result)
+        except json.JSONDecodeError:
+            # Fallback : retourner la réponse brute comme message
+            return jsonify({
+                "reponse": raw[:500] if raw else "Modification appliquée.",
+                "texte_modifie": texte
+            })
+
     except Exception as e:
         traceback.print_exc()
         return jsonify({"error": str(e)}), 500
@@ -460,10 +581,9 @@ def ai_remplir_document():
         adresse_brute = profil.get("adresse", "")
         num_rue, nom_rue = _decomposer_adresse(adresse_brute)
 
-        # Enrichir le profil avec les champs décomposés
         profil_enrichi = dict(profil)
-        profil_enrichi["numero_rue"] = num_rue
-        profil_enrichi["nom_rue"]    = nom_rue
+        profil_enrichi["numero_rue"]       = num_rue
+        profil_enrichi["nom_rue"]          = nom_rue
         profil_enrichi["adresse_complete"] = (
             f"{adresse_brute}, {profil.get('code_postal','')} "
             f"{profil.get('ville','')}".strip(", ")
@@ -485,7 +605,6 @@ def ai_remplir_document():
             f"[{i}] {t}" for i, t in enumerate(champs_doc)
         )[:5000]
 
-        # ── Demander à Claude quels index modifier ────────────────────────────
         system = (
             "Tu es un assistant expert en administration française. "
             "Tu analyses des documents administratifs et identifies "
@@ -513,7 +632,7 @@ Règles importantes :
 
 2. Ne modifie JAMAIS les champs institutionnels :
    structure/composante/direction, N° dossier, visa administratif,
-   cachet, signatures de responsables, intitulé du poste, 
+   cachet, signatures de responsables, intitulé du poste,
    service RH, dates d'intervention fixées par l'institution.
 
 3. Pour le champ Adresse qui contient "N°... Bât... Rue..." :
@@ -538,7 +657,7 @@ Règles importantes :
 7. N'invente aucune information absente du profil.
    Si une info manque, laisse la ligne inchangée.
 
-Exemple de réponse :
+Exemple :
 {{
   "4": "Nom d'usage : DUPONT",
   "6": "Prénom(s) : Marie",
@@ -570,7 +689,7 @@ JSON :"""
             index_map = {}
 
         # ── Appliquer les modifications par index ─────────────────────────────
-        doc_out  = DocxDoc(io.BytesIO(docx_bytes))
+        doc_out   = DocxDoc(io.BytesIO(docx_bytes))
         paras_out = []
         for para in doc_out.paragraphs:
             if para.text.strip():
