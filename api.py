@@ -1,6 +1,6 @@
 """
 api.py — Service Railway complet DocAdmin
-Tous les endpoints PDF + IA Claude + remplissage de documents
+PDF AAP + PDF Vacataire + IA Claude + Remplissage de documents administratifs
 """
 import io, os, json, traceback, base64
 from flask import Flask, request, jsonify, send_file
@@ -236,11 +236,11 @@ de recherche sur 2 ans (2027-2028). Format obligatoire :
 | Grandes étapes | Début prévisionnel | Fin prévisionnelle | Durée estimée |
 |---|---|---|---|
 Titre : {p.get('titre','')}
-8 à 10 étapes.
+8 à 10 étapes couvrant : littérature, collecte, analyse, restitution, livrables, valorisation.
 Tableau :""",
 
             "budget": f"""Justifie les dépenses pour un budget de {p.get('montant',8000)} €
-sur 2 ans : {p.get('titre','')}
+sur 2 ans pour ce projet : {p.get('titre','')}
 Répartition : missions, prestations, séminaires, vacations, matériel.
 Format : liste avec montants en euros.
 Justification :""",
@@ -320,35 +320,29 @@ def ai_extraire_infos():
 
 
 # ══════════════════════════════════════════════════════════════════════════════
-# IA — REMPLIR UN DOCUMENT ADMINISTRATIF (.docx)
+# IA — REMPLIR UN DOCUMENT ADMINISTRATIF (.doc / .docx)
 # ══════════════════════════════════════════════════════════════════════════════
 
 def _fusionner_runs(para):
-    """
-    Fusionne tous les runs d'un paragraphe en un seul pour faciliter
-    les remplacements. Conserve le formatage du premier run.
-    """
+    """Fusionne tous les runs d'un paragraphe en un seul."""
     if len(para.runs) <= 1:
         return
     texte_complet = para.text
     if not texte_complet.strip():
         return
-    # Mettre tout le texte dans le premier run, vider les autres
     para.runs[0].text = texte_complet
     for run in para.runs[1:]:
         run.text = ""
 
 
 def _remplacer_dans_para(para, ancien, nouveau):
-    """Remplace une chaîne dans un paragraphe, en fusionnant les runs si nécessaire."""
+    """Remplace une chaîne dans un paragraphe, fusionne les runs si nécessaire."""
     if ancien not in para.text:
         return False
-    # Essai direct sur les runs existants
     for run in para.runs:
         if ancien in run.text:
             run.text = run.text.replace(ancien, nouveau)
             return True
-    # Fusionner les runs puis remplacer
     _fusionner_runs(para)
     for run in para.runs:
         if ancien in run.text:
@@ -358,34 +352,17 @@ def _remplacer_dans_para(para, ancien, nouveau):
 
 
 def _appliquer_remplacements(doc, remplacements: dict):
-    """Remplace les chaînes dans tous les paragraphes et tableaux.
-    Fusionne les runs si nécessaire pour que les substitutions fonctionnent."""
+    """Remplace les chaînes dans tous les paragraphes et tableaux."""
     for ancien, nouveau in remplacements.items():
         if not isinstance(ancien, str) or not isinstance(nouveau, str):
             continue
-        # Paragraphes directs
         for para in doc.paragraphs:
             _remplacer_dans_para(para, ancien, nouveau)
-        # Paragraphes dans les tableaux
         for table in doc.tables:
             for row in table.rows:
                 for cell in row.cells:
                     for para in cell.paragraphs:
                         _remplacer_dans_para(para, ancien, nouveau)
-
-
-def _fallback_remplacements(profil: dict) -> dict:
-    p = profil
-    adresse = f"{p.get('adresse','')} {p.get('code_postal','')} {p.get('ville','')}".strip()
-    return {
-        "Nom d'usage : ………………………………………………………." : f"Nom d'usage : {p.get('nom','')}",
-        "Nom patronymique : …………………………………………"    : f"Nom patronymique : {p.get('nom','')}",
-        "Prénom(s) : ……………………………………………………"      : f"Prénom(s) : {p.get('prenom','')}",
-        "…….../…..…../…..….."                          : p.get('date_naissance',''),
-        "Nationalité : …………………………"                   : f"Nationalité : {p.get('nationalite','Française')}",
-        "N° Sécurité Sociale : "                       : f"N° Sécurité Sociale : {p.get('num_secu','')}",
-        "Adresse : N°……."                              : f"Adresse : {adresse}",
-    }
 
 
 def _convert_doc_to_docx(doc_bytes: bytes, nom_fich: str) -> bytes:
@@ -413,9 +390,24 @@ def _convert_doc_to_docx(doc_bytes: bytes, nom_fich: str) -> bytes:
 def ai_remplir_document():
     """
     Reçoit un DOC ou DOCX en base64 + le profil utilisateur.
-    Convertit automatiquement les .doc en .docx via LibreOffice.
-    Claude repère tous les champs vides et les remplit avec le profil.
-    Retourne le DOCX complété.
+    - Convertit automatiquement .doc → .docx via LibreOffice
+    - Claude identifie les champs par numéro de ligne et les remplit
+    - Retourne le DOCX complété en binaire
+    
+    Corps attendu :
+    {
+      "fichier_base64": "...",
+      "nom_fichier": "fiche.docx",
+      "profil": {
+        "civilite": "M.", "nom": "Dupont", "prenom": "Marie",
+        "date_naissance": "15/03/1985", "lieu_naissance": "Paris",
+        "adresse": "12 rue de la Paix", "code_postal": "75001", "ville": "Paris",
+        "telephone": "06 12 34 56 78", "email": "marie@example.com",
+        "situation_pro": "Auto-entrepreneur", "siret": "123 456 789 00012",
+        "nationalite": "Française", "pays": "France",
+        "num_secu": "1 85 03 75 056 789 42", "iban": "FR76..."
+      }
+    }
     """
     if not CLAUDE_OK:
         return jsonify({"error": "Service Claude non disponible"}), 503
@@ -450,68 +442,61 @@ def ai_remplir_document():
 
         doc = DocxDoc(io.BytesIO(docx_bytes))
 
-        # Extraire le texte brut
-        texte_doc = []
-        for para in doc.paragraphs:
-            if para.text.strip():
-                texte_doc.append(para.text)
-        for table in doc.tables:
-            for row in table.rows:
-                for cell in row.cells:
-                    if cell.text.strip():
-                        texte_doc.append(cell.text)
-        texte_brut = "\n".join(texte_doc)[:5000]
-
-        # ── Extraire les paragraphes champ par champ ──────────────────────────
-        # Construire un mapping : texte_para → para_index pour chaque cellule
+        # ── Construire la liste numérotée des paragraphes ─────────────────────
         champs_doc = []
         for para in doc.paragraphs:
             if para.text.strip():
-                champs_doc.append({"texte": para.text, "source": "para"})
-        for ti, table in enumerate(doc.tables):
-            for ri, row in enumerate(table.rows):
-                for ci, cell in enumerate(row.cells):
-                    for pi, para in enumerate(cell.paragraphs):
+                champs_doc.append(para.text)
+        for table in doc.tables:
+            for row in table.rows:
+                for cell in row.cells:
+                    for para in cell.paragraphs:
                         if para.text.strip():
-                            champs_doc.append({
-                                "texte": para.text,
-                                "source": f"table_{ti}_{ri}_{ci}_{pi}"
-                            })
+                            champs_doc.append(para.text)
 
-        # Limiter à 5000 chars
         champs_str = "\n".join(
-            f"[{i}] {c['texte']}" for i, c in enumerate(champs_doc)
+            f"[{i}] {t}" for i, t in enumerate(champs_doc)
         )[:5000]
 
+        # ── Demander à Claude quels index modifier ────────────────────────────
         system = (
             "Tu es un assistant expert en administration française. "
             "Tu analyses des documents administratifs et identifies "
-            "les champs à remplir. "
+            "les champs personnels à remplir pour un intervenant. "
             "Tu retournes UNIQUEMENT un objet JSON valide, "
             "sans texte avant ni après, sans balises markdown."
         )
 
-        user = f"""Voici les lignes d'un document administratif numérotées :
+        user = f"""Voici les lignes numérotées d'un document administratif :
 
 {champs_str}
 
-Voici le profil de la personne :
+Voici le profil de la personne qui doit remplir ce document :
 {json.dumps(profil, ensure_ascii=False, indent=2)}
 
-Pour chaque ligne qui contient un champ vide (avec des ……, des □, ou du texte à compléter),
-retourne un JSON avec :
-- clé = le numéro de ligne entre crochets (ex: "3")
-- valeur = le texte COMPLET de la ligne tel qu'il doit apparaître après remplissage
+Retourne un JSON où :
+- la clé est le numéro de ligne (ex: "4")
+- la valeur est le texte COMPLET de la ligne après remplissage
 
-Ne retourne que les lignes à modifier. Pour les cases à cocher □,
-coche la bonne case avec ☑ et laisse les autres □.
+Règles importantes :
+- Remplis UNIQUEMENT les champs d'identification personnelle 
+  (nom, prénom, adresse, date de naissance, email, téléphone, 
+   nationalité, situation professionnelle, N° sécu, IBAN, SIRET)
+- Ne modifie PAS les champs destinés à l'institution 
+  (structure/composante, N° dossier, visa administratif, 
+   cachet, signatures de responsables)
+- Pour les cases à cocher □, coche la bonne avec ☑, laisse les autres □
+- N'invente aucune information absente du profil
 
-Exemple de réponse :
+Exemple :
 {{
   "4": "Nom d'usage : DUPONT",
-  "8": "Prénom(s) : Marie",
-  "10": "Né(e) le : 06/10/2001 à Toulouse",
-  "15": "☑ Travailleur non-salarié"
+  "6": "Prénom(s) : Marie",
+  "8": "Né(e) le : 15/03/1985 à Paris",
+  "10": "Adresse : 12 rue de la Paix 75001 Paris",
+  "12": "Mail : marie@example.com",
+  "15": "Nationalité : Française",
+  "20": "□ Personnel du secteur privé   □ Personnel du secteur public   ☑ Travailleur non-salarié"
 }}
 
 JSON :"""
@@ -528,21 +513,19 @@ JSON :"""
         try:
             index_map = json.loads(raw)
         except json.JSONDecodeError:
-            print(f"WARNING: JSON invalide de Claude, utilisation fallback")
+            print(f"WARNING: JSON invalide de Claude: {raw[:200]}")
             index_map = {}
 
-        # ── Appliquer par index de paragraphe ─────────────────────────────────
-        doc_out = DocxDoc(io.BytesIO(docx_bytes))
-
-        # Reconstruire la même liste ordonnée sur doc_out
+        # ── Appliquer les modifications par index ─────────────────────────────
+        doc_out  = DocxDoc(io.BytesIO(docx_bytes))
         paras_out = []
         for para in doc_out.paragraphs:
             if para.text.strip():
                 paras_out.append(para)
-        for ti, table in enumerate(doc_out.tables):
-            for ri, row in enumerate(table.rows):
-                for ci, cell in enumerate(row.cells):
-                    for pi, para in enumerate(cell.paragraphs):
+        for table in doc_out.tables:
+            for row in table.rows:
+                for cell in row.cells:
+                    for para in cell.paragraphs:
                         if para.text.strip():
                             paras_out.append(para)
 
@@ -555,8 +538,6 @@ JSON :"""
                     if para.runs:
                         para.runs[0].text = nouveau_texte
                     else:
-                        # Pas de run : ajouter un nouveau
-                        from docx.oxml.ns import qn
                         from docx.oxml import OxmlElement
                         r = OxmlElement('w:r')
                         t = OxmlElement('w:t')
@@ -566,6 +547,7 @@ JSON :"""
             except (ValueError, IndexError) as e:
                 print(f"WARNING: index {idx_str} invalide: {e}")
 
+        # ── Sauvegarder et retourner ──────────────────────────────────────────
         buf = io.BytesIO()
         doc_out.save(buf)
         buf.seek(0)
