@@ -365,6 +365,19 @@ def _appliquer_remplacements(doc, remplacements: dict):
                         _remplacer_dans_para(para, ancien, nouveau)
 
 
+def _decomposer_adresse(adresse: str):
+    """
+    Décompose une adresse complète en numéro + rue.
+    Ex: '50 rue saint jacques' → ('50', 'rue saint jacques')
+    """
+    import re
+    adresse = adresse.strip()
+    m = re.match(r'^(\d+\s*(?:bis|ter|quater)?)\s+(.+)$', adresse, re.IGNORECASE)
+    if m:
+        return m.group(1).strip(), m.group(2).strip()
+    return "", adresse
+
+
 def _convert_doc_to_docx(doc_bytes: bytes, nom_fich: str) -> bytes:
     """Convertit un .doc en .docx via LibreOffice headless."""
     import subprocess, tempfile, glob
@@ -393,7 +406,7 @@ def ai_remplir_document():
     - Convertit automatiquement .doc → .docx via LibreOffice
     - Claude identifie les champs par numéro de ligne et les remplit
     - Retourne le DOCX complété en binaire
-    
+
     Corps attendu :
     {
       "fichier_base64": "...",
@@ -405,7 +418,8 @@ def ai_remplir_document():
         "telephone": "06 12 34 56 78", "email": "marie@example.com",
         "situation_pro": "Auto-entrepreneur", "siret": "123 456 789 00012",
         "nationalite": "Française", "pays": "France",
-        "num_secu": "1 85 03 75 056 789 42", "iban": "FR76..."
+        "num_secu": "1 85 03 75 056 789 42", "iban": "FR76...",
+        "situation_famille": "Célibataire"
       }
     }
     """
@@ -442,6 +456,19 @@ def ai_remplir_document():
 
         doc = DocxDoc(io.BytesIO(docx_bytes))
 
+        # ── Décomposer l'adresse en numéro + rue ─────────────────────────────
+        adresse_brute = profil.get("adresse", "")
+        num_rue, nom_rue = _decomposer_adresse(adresse_brute)
+
+        # Enrichir le profil avec les champs décomposés
+        profil_enrichi = dict(profil)
+        profil_enrichi["numero_rue"] = num_rue
+        profil_enrichi["nom_rue"]    = nom_rue
+        profil_enrichi["adresse_complete"] = (
+            f"{adresse_brute}, {profil.get('code_postal','')} "
+            f"{profil.get('ville','')}".strip(", ")
+        )
+
         # ── Construire la liste numérotée des paragraphes ─────────────────────
         champs_doc = []
         for para in doc.paragraphs:
@@ -471,32 +498,58 @@ def ai_remplir_document():
 
 {champs_str}
 
-Voici le profil de la personne qui doit remplir ce document :
-{json.dumps(profil, ensure_ascii=False, indent=2)}
+Voici le profil de la personne :
+{json.dumps(profil_enrichi, ensure_ascii=False, indent=2)}
 
 Retourne un JSON où :
 - la clé est le numéro de ligne (ex: "4")
 - la valeur est le texte COMPLET de la ligne après remplissage
 
 Règles importantes :
-- Remplis UNIQUEMENT les champs d'identification personnelle 
-  (nom, prénom, adresse, date de naissance, email, téléphone, 
-   nationalité, situation professionnelle, N° sécu, IBAN, SIRET)
-- Ne modifie PAS les champs destinés à l'institution 
-  (structure/composante, N° dossier, visa administratif, 
-   cachet, signatures de responsables)
-- Pour les cases à cocher □, coche la bonne avec ☑, laisse les autres □
-- N'invente aucune information absente du profil
+1. Remplis UNIQUEMENT les champs d'identification personnelle :
+   nom, prénom, adresse, date/lieu de naissance, email, téléphone,
+   nationalité, situation professionnelle, N° sécu, IBAN, SIRET,
+   situation de famille.
 
-Exemple :
+2. Ne modifie JAMAIS les champs institutionnels :
+   structure/composante/direction, N° dossier, visa administratif,
+   cachet, signatures de responsables, intitulé du poste, 
+   service RH, dates d'intervention fixées par l'institution.
+
+3. Pour le champ Adresse qui contient "N°... Bât... Rue..." :
+   - Utilise "numero_rue" pour le N°
+   - Utilise "nom_rue" pour la Rue
+   - Laisse Bât vide s'il n'est pas renseigné
+   Ex: "Adresse : N°50   Bât. :    Rue : rue saint jacques"
+
+4. Pour le champ "Code Postal... Ville..." :
+   - Mets UNIQUEMENT le code postal et la ville
+   - Ne mets PAS le téléphone dans ce champ
+   Ex: "Code Postal : 75005  Ville : Paris"
+
+5. Le téléphone a SA PROPRE ligne dans le document.
+   Cherche une ligne avec "Tél" ou "Téléphone" et mets-y le numéro.
+
+6. Pour les cases à cocher □ :
+   - Coche la bonne case avec ☑
+   - Laisse les autres □
+   - Conserve l'espacement exact de la ligne
+
+7. N'invente aucune information absente du profil.
+   Si une info manque, laisse la ligne inchangée.
+
+Exemple de réponse :
 {{
   "4": "Nom d'usage : DUPONT",
   "6": "Prénom(s) : Marie",
   "8": "Né(e) le : 15/03/1985 à Paris",
-  "10": "Adresse : 12 rue de la Paix 75001 Paris",
-  "12": "Mail : marie@example.com",
+  "10": "Adresse : N°12   Bât. :    Rue : rue de la Paix",
+  "11": "Code Postal : 75001  Ville : Paris",
+  "12": "Tél : 06 12 34 56 78",
+  "13": "Mail : marie@example.com",
   "15": "Nationalité : Française",
-  "20": "□ Personnel du secteur privé   □ Personnel du secteur public   ☑ Travailleur non-salarié"
+  "18": "Situation de famille : Célibataire",
+  "20": "□ Personnel du secteur privé   □ Personnel du secteur public   ☑ Travailleur non-salarié   □ Retraité"
 }}
 
 JSON :"""
