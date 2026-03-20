@@ -6,7 +6,6 @@ import io, os, json, traceback, base64
 from flask import Flask, request, jsonify, send_file
 from flask_cors import CORS
 
-
 app = Flask(__name__)
 CORS(app, origins="*")
 
@@ -21,7 +20,29 @@ except ImportError:
     print("WARNING: anthropic non installé")
 
 try:
-    from generate_annexes import generate_annexe1_pdf, generate_annexe1bis_pdf
+    from generate_annexes import build_annexe1, build_annexe1bis
+    # Alias pour compatibilité
+    def generate_annexe1_pdf(data):
+        import os
+        logo_path = os.path.join(os.path.dirname(__file__), 'logo_inspe.png')
+        logo_bytes = None
+        if os.path.exists(logo_path):
+            with open(logo_path, 'rb') as f:
+                logo_bytes = f.read()
+        project = data.get('project', data)
+        return build_annexe1(project, logo_bytes)
+
+    def generate_annexe1bis_pdf(data):
+        import os
+        logo_path = os.path.join(os.path.dirname(__file__), 'logo_inspe.png')
+        logo_bytes = None
+        if os.path.exists(logo_path):
+            with open(logo_path, 'rb') as f:
+                logo_bytes = f.read()
+        project = data.get('project', data)
+        budget_lines = data.get('budget_lines', data.get('lignes', []))
+        return build_annexe1bis(project, budget_lines, logo_bytes)
+
     ANNEXES_OK = True
 except ImportError as e:
     ANNEXES_OK = False
