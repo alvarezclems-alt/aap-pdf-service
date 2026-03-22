@@ -464,6 +464,99 @@ def ai_extraire_infos():
 
 
 # ══════════════════════════════════════════════════════════════════════════════
+# IA — EXTRAIRE JUSTIFICATIF
+# ══════════════════════════════════════════════════════════════════════════════
+
+@app.route("/ai/extraire-justificatif", methods=["POST"])
+def ai_extraire_justificatif():
+    if not CLAUDE_OK:
+        return jsonify({"error": "Service Claude non disponible"}), 503
+    try:
+        d = request.get_json(force=True) or {}
+        b64 = d.get("fichier_base64", "")
+        mime = d.get("type_mime", "")
+        nom = d.get("nom_fichier", "fichier")
+        
+        if not b64:
+            return jsonify({"error": "Fichier manquant"}), 400
+            
+        system = (
+            "Tu es un expert comptable et administratif. "
+            "Tu analyses le fichier fourni (une facture, un billet, un RIB, etc.) "
+            "et tu retournes UNIQUEMENT un JSON valide, sans code avant ni après."
+        )
+        user = f"""Analyse ce document ({nom}) et retourne un JSON avec cette structure (ne mets que les champs que tu trouves, ignore les autres) :
+{{
+  "type_document": "Choisis parmi: billet_train, billet_avion, facture_hotel, taxi, peage, rib, autre",
+  "resume": "Courte description de 3-4 mots (ex: Billet SNCF Paris-Lyon, Facture Ibis, RIB)",
+  "informations": {{
+    "montant": Nombre flottant (ex: 45.50),
+    "devise": "EUR",
+    "date": "JJ/MM/AAAA",
+    "origine": "Ville de départ",
+    "destination": "Ville d'arrivée",
+    "iban": "FR...",
+    "bic": "...",
+    "titulaire": "Nom du titulaire"
+  }}
+}}"""
+        
+        content = []
+        if mime == "application/pdf":
+            content.append({
+                "type": "document",
+                "source": {
+                    "type": "base64",
+                    "media_type": "application/pdf",
+                    "data": b64
+                }
+            })
+        elif mime in ["image/jpeg", "image/png", "image/webp", "image/gif"]:
+            content.append({
+                "type": "image",
+                "source": {
+                    "type": "base64",
+                    "media_type": mime,
+                    "data": b64
+                }
+            })
+        elif mime == "application/vnd.openxmlformats-officedocument.wordprocessingml.document" or nom.endswith(".docx"):
+            import io
+            from docx import Document as DocxDoc
+            docx_bytes = base64.b64decode(b64)
+            doc = DocxDoc(io.BytesIO(docx_bytes))
+            texte = "\\n".join([p.text for p in doc.paragraphs])
+            content.append({
+                "type": "text", 
+                "text": f"Contenu du DOCX :\\n{texte[:10000]}\\n\\n"
+            })
+        else:
+            return jsonify({"error": f"Format non supporté par l'IA: {mime}"}), 400
+            
+        content.append({"type": "text", "text": user})
+        
+        response = claude.messages.create(
+            model=CLAUDE_MODEL,
+            max_tokens=1000,
+            system=system,
+            messages=[{"role": "user", "content": content}]
+        )
+        
+        raw = response.content[0].text.strip()
+        if raw.startswith("```"):
+            parts = raw.split("```")
+            raw = parts[1] if len(parts) > 1 else raw
+            if raw.startswith("json"):
+                raw = raw[4:]
+        raw = raw.strip()
+        
+        return jsonify(json.loads(raw))
+    except Exception as e:
+        traceback.print_exc()
+        return jsonify({"error": str(e)}), 500
+
+
+# ══════════════════════════════════════════════════════════════════════════════
 # IA — REMPLIR UN DOCUMENT ADMINISTRATIF (.doc / .docx)
 # ══════════════════════════════════════════════════════════════════════════════
 
