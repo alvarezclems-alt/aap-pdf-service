@@ -617,14 +617,20 @@ def _decomposer_adresse(adresse: str):
 
 def _convert_doc_to_docx(doc_bytes: bytes, nom_fich: str) -> bytes:
     """Convertit un .doc en .docx via LibreOffice headless."""
-    import subprocess, tempfile, glob
+    import subprocess, tempfile, glob, os
     with tempfile.TemporaryDirectory() as tmpdir:
         input_path = os.path.join(tmpdir, nom_fich)
         with open(input_path, "wb") as f:
             f.write(doc_bytes)
+            
+        ext = os.path.splitext(nom_fich)[1].lower()
+        cmd = ["libreoffice", "--headless"]
+        if ext == ".pdf":
+            cmd.extend(["--infilter=writer_pdf_import"])
+        cmd.extend(["--convert-to", "docx", "--outdir", tmpdir, input_path])
+        
         result = subprocess.run(
-            ["libreoffice", "--headless", "--convert-to", "docx",
-             "--outdir", tmpdir, input_path],
+            cmd,
             capture_output=True, text=True, timeout=60
         )
         if result.returncode != 0:
