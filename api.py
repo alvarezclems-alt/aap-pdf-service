@@ -719,14 +719,70 @@ def ai_remplir_document():
 
         ext = os.path.splitext(nom_fich)[1].lower()
         if ext == ".pdf":
-            print(f"Conversion super-puissante .pdf → .docx : {nom_fich}")
+            print(f"Surimpression PDF natif activée : {nom_fich}")
+            import fitz
+            import json
             try:
-                docx_bytes = _force_pdf_to_docx(raw_bytes, nom_fich)
-                nom_fich = os.path.splitext(nom_fich)[0] + ".docx"
-            except Exception as conv_err:
-                print(f"WARNING: Conversion PDF vers Word échouée: {conv_err}")
+                doc_pdf = fitz.open(stream=raw_bytes, filetype="pdf")
+                pdf_text = ""
+                for page in doc_pdf:
+                    pdf_text += page.get_text("text") + "\n"
+                
+                prompt = (
+                    "Voici le texte brut d'un formulaire PDF.\n"
+                    "Ton but est de déduire quelles informations doivent être écrites à côté de quelles étiquettes.\n"
+                    f"Voici les données du profil utilisateur : {json.dumps(profil, ensure_ascii=False)}\n\n"
+                    "Règles:\n"
+                    "1. Recherche les étiquettes EXACTES dans le texte (ex: 'Nom :', 'Prénom :', 'Ville :').\n"
+                    "2. Renvoie UNIQUEMENT un objet JSON valide, sans aucune explication avant ni après.\n"
+                    "3. Les clés du JSON doivent être les étiquettes ou cases (ex: '□ M.' ou 'q M.') EXACTES telles qu'elles apparaissent dans le texte !\n"
+                    "4. Les valeurs du JSON doivent être les textes à insérer. Pour cocher une case, mets 'X'.\n\n"
+                    f"Texte du PDF à analyser :\n{pdf_text[:10000]}"
+                )
+                
+                response = claude.messages.create(
+                    model=CLAUDE_MODEL,
+                    max_tokens=2048,
+                    temperature=0.0,
+                    system="Tu es un robot qui ne répond que par un objet JSON valide (aucun commentaire ni balise markdown).",
+                    messages=[{"role": "user", "content": prompt}]
+                )
+                
+                reponse_texte = response.content[0].text.strip()
+                if reponse_texte.startswith("```json"):
+                    reponse_texte = reponse_texte.replace("```json", "", 1)
+                if reponse_texte.endswith("```"):
+                    reponse_texte = reponse_texte[:-3]
+                
+                ai_mapping = json.loads(reponse_texte.strip())
+                print("MAPPING PDF TROUVÉ: ", ai_mapping)
+                
+                for page in doc_pdf:
+                    for label, tval in ai_mapping.items():
+                        if not tval: continue
+                        rects = page.search_for(str(label))
+                        for r in rects:
+                            if "□" in str(label) or "q " in str(label):
+                                # Cocher la case (tampon X)
+                                page.insert_text((r.x0 + 1, r.y1 - 2), "X", fontsize=12, color=(0, 0, 0.6))
+                            else:
+                                # Écrire la valeur à droite de l'étiquette
+                                page.insert_text((r.x1 + 4, r.y1 - 1), str(tval), fontsize=10, color=(0, 0, 0.6))
+                                
+                pdf_buf = io.BytesIO(doc_pdf.write())
+                doc_pdf.close()
+                pdf_buf.seek(0)
+                
+                return send_file(
+                    pdf_buf,
+                    mimetype="application/pdf",
+                    as_attachment=True,
+                    download_name=nom_fich
+                )
+            except Exception as err:
+                print(f"WARNING: Erreur de surimpression PDF: {err}")
                 return jsonify({
-                    "error": "Impossible de lire ce PDF. Veuillez essayer avec un autre fichier ou un format Word."
+                    "error": f"Impossible d'imprimer sur ce PDF nativement : {err}"
                 }), 422
         elif ext == ".doc":
             print(f"Conversion .doc → .docx : {nom_fich}")
