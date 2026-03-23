@@ -640,6 +640,25 @@ def _convert_doc_to_docx(doc_bytes: bytes, nom_fich: str) -> bytes:
             raise RuntimeError("Conversion LibreOffice : aucun .docx produit")
         with open(docx_files[0], "rb") as f:
             return f.read()
+def _convert_docx_to_pdf(docx_bytes: bytes, nom_fich: str) -> bytes:
+    """Convertit un .docx en .pdf via LibreOffice headless."""
+    import subprocess, tempfile, glob, os
+    with tempfile.TemporaryDirectory() as tmpdir:
+        input_path = os.path.join(tmpdir, "doc.docx")
+        with open(input_path, "wb") as f:
+            f.write(docx_bytes)
+        result = subprocess.run(
+            ["libreoffice", "--headless", "--convert-to", "pdf",
+             "--outdir", tmpdir, input_path],
+            capture_output=True, text=True, timeout=60
+        )
+        if result.returncode != 0:
+            raise RuntimeError(f"LibreOffice erreur: {result.stderr}")
+        pdf_files = glob.glob(os.path.join(tmpdir, "*.pdf"))
+        if not pdf_files:
+            raise RuntimeError("Conversion LibreOffice : aucun .pdf produit")
+        with open(pdf_files[0], "rb") as f:
+            return f.read()
 
 
 @app.route("/ai/remplir-document", methods=["POST"])
@@ -681,8 +700,10 @@ def ai_remplir_document():
 
         raw_bytes = base64.b64decode(b64)
 
-        # ── Conversion automatique .doc → .docx ──────────────────────────────
         ext = os.path.splitext(nom_fich)[1].lower()
+        if ext == ".pdf":
+            return jsonify({"error": "Veuillez fournir un modèle vierge en Word (.docx ou .doc) (pas de PDF). L'IA remplira le Word et vous génèrera un PDF complété magiquement !"}), 400
+
         if ext == ".doc":
             print(f"Conversion .doc → .docx : {nom_fich}")
             try:
@@ -691,8 +712,7 @@ def ai_remplir_document():
             except Exception as conv_err:
                 print(f"WARNING: Conversion échouée: {conv_err}")
                 return jsonify({
-                    "error": "Conversion .doc impossible. "
-                             "Ouvrez le fichier dans Word et enregistrez-le en .docx."
+                    "error": "Conversion .doc impossible. Ouvrez le fichier dans Word et enregistrez-le en .docx."
                 }), 422
         else:
             docx_bytes = raw_bytes
@@ -845,16 +865,22 @@ JSON :"""
         buf = io.BytesIO()
         doc_out.save(buf)
         buf.seek(0)
+        
+        try:
+            pdf_bytes = _convert_docx_to_pdf(buf.getvalue(), nom_fich)
+            pdf_buf = io.BytesIO(pdf_bytes)
+        except Exception as conv_pdf_err:
+             return jsonify({"error": f"Erreur lors de la génération du PDF final: {conv_pdf_err}"}), 500
 
         p = profil
         if p.get("nom") and p.get("prenom"):
-            nom_sortie = f"document-{p['prenom'].lower()}-{p['nom'].lower()}.docx"
+            nom_sortie = f"document-{p['prenom'].lower()}-{p['nom'].lower()}.pdf"
         else:
-            nom_sortie = f"{os.path.splitext(nom_fich)[0]}-complété.docx"
+            nom_sortie = f"{os.path.splitext(nom_fich)[0]}-complété.pdf"
 
         return send_file(
-            buf,
-            mimetype="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+            pdf_buf,
+            mimetype="application/pdf",
             as_attachment=True,
             download_name=nom_sortie,
         )
