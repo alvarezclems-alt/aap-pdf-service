@@ -711,6 +711,7 @@ def ai_remplir_document():
         profil   = data.get("profil", {})
         b64      = data.get("fichier_base64", "")
         nom_fich = data.get("nom_fichier", "document.docx")
+        justifs  = data.get("justificatifs", [])
 
         if not b64:
             return jsonify({"error": "fichier_base64 manquant"}), 400
@@ -731,17 +732,18 @@ def ai_remplir_document():
                 prompt = (
                     "Tu es un data-entry bot strict expert en traitement de formulaires.\n"
                     "Voici le texte brut d'un formulaire PDF vierge que tu dois remplir.\n"
-                    f"PROFIL UTILISATEUR : {json.dumps(profil, ensure_ascii=False)}\n\n"
+                    f"PROFIL UTILISATEUR : {json.dumps(profil, ensure_ascii=False)}\n"
+                    f"JUSTIFICATIFS A INJECTER : {json.dumps(justifs, ensure_ascii=False)}\n\n"
                     "INSTRUCTIONS CRUCIALES :\n"
                     "1. Remplis UNIQUEMENT les zones de saisie prévues (lignes pointillées, champs vides, tableau 'Catégories/Montant').\n"
                     "2. NE REMPLIS JAMAIS les paragraphes d'instruction en haut du PDF (ex: 'remboursement maximum', 'si vous voyagez en...').\n"
                     "3. Rends UNIQUEMENT un objet JSON valide. Pas de markdown, de bonjour ou d'explications.\n"
-                    "4. Les clés json sont les textes EXACTS situés juste avant la zone à remplir (ex: 'Nom :', 'Prénom :', 'Train').\n"
+                    "4. Les clés json sont les textes EXACTS (incluant la ponctuation comme ':') situés juste avant la zone à remplir (ex: 'Nom :', 'Prénom :', 'Train'). Ne coupe pas les ':'.\n"
                     "5. Chaque valeur est un objet { \"val\": \"...\", \"type\": \"...\", \"col_header\": \"...\" }\n\n"
                     "TYPES D'ALIGNEMENT ('type') :\n"
                     "- 'right' : champ texte classique (ex: 'Nom :', 'Ville :').\n"
                     "- 'check' : pour cocher une case (ex: '□ M.'). La valeur doit être 'X'.\n"
-                    "- 'column' : pour un tableau de dépenses (ex: étiquette 'Train' ou 'Avion'). col_header doit être l'en-tête de colonne ('Montant').\n\n"
+                    "- 'column' : pour un tableau de dépenses (ex: étiquette 'Train' ou 'Avion', provenant des JUSTIFICATIFS). col_header doit être l'en-tête de colonne ('Montant').\n\n"
                     "Exemple de réponse attendue :\n"
                     "{\n"
                     "  \"Nom :\": {\"val\": \"Dupont\", \"type\": \"right\"},\n"
@@ -792,7 +794,8 @@ def ai_remplir_document():
                                         col_x = (h_r.x0 + h_r.x1) / 2 - 10
                                 page.insert_text((col_x, r.y1 - 1), str(tval), fontsize=10, color=(0, 0, 0.6))
                             else:
-                                page.insert_text((r.x1 + 6, r.y1 - 1), str(tval), fontsize=10, color=(0, 0, 0.6))
+                                # increased padding from +6 to +15 to avoid colon / space overlap if label missed dots
+                                page.insert_text((r.x1 + 15, r.y1 - 1), str(tval), fontsize=10, color=(0, 0, 0.6))
                                 
                 pdf_buf = io.BytesIO(doc_pdf.write())
                 doc_pdf.close()
