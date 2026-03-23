@@ -781,7 +781,12 @@ def ai_remplir_document():
                         if not tval: continue
                         
                         rects = page.search_for(str(label))
-                        for r in rects:
+                        if rects:
+                            # TRES IMPORTANT: On ne prend QUE la dernière occurrence du mot sur la page.
+                            # Les formulaires placent quasiment toujours les instructions (textes explicatifs) 
+                            # en haut de la page, et les vrais champs de saisie ou tableaux tout en bas.
+                            r = rects[-1]
+                            
                             if atype == "check":
                                 page.insert_text((r.x0 + 1, r.y1 - 2), "X", fontsize=12, color=(0, 0, 0.6))
                             elif atype == "column":
@@ -790,12 +795,13 @@ def ai_remplir_document():
                                 if col_header:
                                     h_rects = page.search_for(str(col_header))
                                     if h_rects:
-                                        h_r = h_rects[0]
+                                        # Prendre aussi le dernier header s'il y en a plusieurs
+                                        h_r = h_rects[-1]
                                         col_x = (h_r.x0 + h_r.x1) / 2 - 10
                                 page.insert_text((col_x, r.y1 - 1), str(tval), fontsize=10, color=(0, 0, 0.6))
                             else:
-                                # increased padding from +6 to +15 to avoid colon / space overlap if label missed dots
-                                page.insert_text((r.x1 + 15, r.y1 - 1), str(tval), fontsize=10, color=(0, 0, 0.6))
+                                # increased padding to +35 to avoid colon / space overlap if label missed dots
+                                page.insert_text((r.x1 + 35, r.y1 - 1), str(tval), fontsize=10, color=(0, 0, 0.6))
                                 
                 pdf_buf = io.BytesIO(doc_pdf.write())
                 doc_pdf.close()
