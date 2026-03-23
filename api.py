@@ -767,42 +767,86 @@ def ai_remplir_document():
                 if reponse_texte.endswith("```"):
                     reponse_texte = reponse_texte[:-3]
                 
-                ai_mapping = json.loads(reponse_texte.strip())
+                cleaned_response = reponse_texte.strip()
+                json_start = cleaned_response.find("{")
+                json_end = cleaned_response.rfind("}")
+                if json_start == -1 or json_end == -1 or json_end <= json_start:
+                    raise ValueError("Réponse IA non exploitable (JSON introuvable)")
+
+                ai_mapping = json.loads(cleaned_response[json_start:json_end + 1])
                 print("MAPPING PDF INTELLIGENT TROUVÉ: ", ai_mapping)
-                
+
+                def _pick_anchor(rects, page_height):
+                    """Priorise les occurrences les plus basses (zone formulaire)."""
+                    if not rects:
+                        return None
+                    rects_sorted = sorted(rects, key=lambda rr: rr.y0)
+                    bottom_half = [rr for rr in rects_sorted if rr.y0 > page_height * 0.35]
+                    return (bottom_half[-1] if bottom_half else rects_sorted[-1])
+
                 for page_num in range(doc_pdf.page_count):
                     page = doc_pdf[page_num]
+                    page_height = page.rect.height
+
+                    # Index des labels trouvés sur la page pour limiter les chevauchements
+                    anchors = []
+                    for label, config in ai_mapping.items():
+                        if not isinstance(config, dict):
+                            continue
+                        rects = page.search_for(str(label))
+                        anchor = _pick_anchor(rects, page_height)
+                        if anchor is not None:
+                            anchors.append((label, anchor))
+
                     for label, config in ai_mapping.items():
                         if not isinstance(config, dict) or "val" not in config:
                             continue
-                        
+
                         tval = config.get("val", "")
                         atype = config.get("type", "right")
-                        if not tval: continue
-                        
+                        if not tval:
+                            continue
+
                         rects = page.search_for(str(label))
-                        if rects:
-                            # TRES IMPORTANT: On ne prend QUE la dernière occurrence du mot sur la page.
-                            # Les formulaires placent quasiment toujours les instructions (textes explicatifs) 
-                            # en haut de la page, et les vrais champs de saisie ou tableaux tout en bas.
-                            r = rects[-1]
-                            
-                            if atype == "check":
-                                page.insert_text((r.x0 + 1, r.y1 - 2), "X", fontsize=12, color=(0, 0, 0.6))
-                            elif atype == "column":
-                                col_header = config.get("col_header", "")
-                                col_x = r.x1 + 80
-                                if col_header:
-                                    h_rects = page.search_for(str(col_header))
-                                    if h_rects:
-                                        # Prendre aussi le dernier header s'il y en a plusieurs
-                                        h_r = h_rects[-1]
-                                        col_x = (h_r.x0 + h_r.x1) / 2 - 10
-                                page.insert_text((col_x, r.y1 - 1), str(tval), fontsize=10, color=(0, 0, 0.6))
-                            else:
-                                # increased padding to +35 to avoid colon / space overlap if label missed dots
-                                page.insert_text((r.x1 + 35, r.y1 - 1), str(tval), fontsize=10, color=(0, 0, 0.6))
-                                
+                        r = _pick_anchor(rects, page_height)
+                        if not r:
+                            continue
+
+                        if atype == "check":
+                            page.insert_text((r.x0 + 1, r.y1 - 2), "X", fontsize=12, color=(0, 0, 0.6))
+                            continue
+
+                        if atype == "column":
+                            col_header = config.get("col_header", "")
+                            col_x = r.x1 + 80
+                            if col_header:
+                                h_rects = page.search_for(str(col_header))
+                                h_r = _pick_anchor(h_rects, page_height)
+                                if h_r:
+                                    col_x = (h_r.x0 + h_r.x1) / 2 - 10
+                            page.insert_text((col_x, r.y1 - 1), str(tval), fontsize=10, color=(0, 0, 0.6))
+                            continue
+
+                        # "right" : écrire juste après le label, sans empiéter sur un label voisin.
+                        baseline = (r.y0 + r.y1) / 2
+                        right_neighbors = [
+                            a for a_label, a in anchors
+                            if a_label != label
+                            and abs(((a.y0 + a.y1) / 2) - baseline) < 6
+                            and a.x0 > r.x1
+                        ]
+                        next_x = min((a.x0 for a in right_neighbors), default=page.rect.width - 25)
+                        start_x = r.x1 + 6
+                        end_x = max(start_x + 40, next_x - 4)
+                        target_rect = fitz.Rect(start_x, r.y0 - 1, end_x, r.y1 + 2)
+                        page.insert_textbox(
+                            target_rect,
+                            str(tval),
+                            fontsize=10,
+                            color=(0, 0, 0.6),
+                            align=0,
+                        )
+
                 pdf_buf = io.BytesIO(doc_pdf.write())
                 doc_pdf.close()
                 pdf_buf.seek(0)
