@@ -807,6 +807,54 @@ def _search_label_rects(page, label):
                 found.append(r)
     return found
 
+def _extract_json_obj(raw_text):
+    txt = (raw_text or "").strip()
+    if txt.startswith("```json"):
+        txt = txt.replace("```json", "", 1)
+    if txt.endswith("```"):
+        txt = txt[:-3]
+    txt = txt.strip()
+    json_start = txt.find("{")
+    json_end = txt.rfind("}")
+    if json_start == -1 or json_end == -1 or json_end <= json_start:
+        raise ValueError("Réponse IA non exploitable (JSON introuvable)")
+    return json.loads(txt[json_start:json_end + 1])
+
+def _build_llm_pdf_mapping(pdf_text, profil, justifs):
+    prompt = (
+        "Tu es un data-entry bot strict expert en traitement de formulaires.\n"
+        "Voici le texte brut d'un formulaire PDF vierge que tu dois remplir.\n"
+        f"PROFIL UTILISATEUR : {json.dumps(profil, ensure_ascii=False)}\n"
+        f"JUSTIFICATIFS A INJECTER : {json.dumps(justifs, ensure_ascii=False)}\n\n"
+        "INSTRUCTIONS CRUCIALES :\n"
+        "1. Remplis UNIQUEMENT les zones de saisie prévues (lignes pointillées, champs vides, tableau 'Catégories/Montant').\n"
+        "2. NE REMPLIS JAMAIS les paragraphes d'instruction en haut du PDF (ex: 'remboursement maximum', 'si vous voyagez en...').\n"
+        "3. Rends UNIQUEMENT un objet JSON valide. Pas de markdown, de bonjour ou d'explications.\n"
+        "4. Les clés json sont les textes EXACTS (incluant la ponctuation comme ':') situés juste avant la zone à remplir (ex: 'Nom :', 'Prénom :', 'Train'). Ne coupe pas les ':'.\n"
+        "5. Chaque valeur est un objet { \"val\": \"...\", \"type\": \"...\", \"col_header\": \"...\" }\n\n"
+        "TYPES D'ALIGNEMENT ('type') :\n"
+        "- 'right' : champ texte classique (ex: 'Nom :', 'Ville :').\n"
+        "- 'check' : pour cocher une case (ex: '□ M.'). La valeur doit être 'X'.\n"
+        "- 'column' : pour un tableau de dépenses (ex: étiquette 'Train' ou 'Avion', provenant des JUSTIFICATIFS). col_header doit être l'en-tête de colonne ('Montant').\n\n"
+        "Exemple de réponse attendue :\n"
+        "{\n"
+        "  \"Nom :\": {\"val\": \"Dupont\", \"type\": \"right\"},\n"
+        "  \"□ M.\": {\"val\": \"X\", \"type\": \"check\"},\n"
+        "  \"Train\": {\"val\": \"350\", \"type\": \"column\", \"col_header\": \"Montant\"}\n"
+        "}\n\n"
+        f"TEXTE DU PDF À ANALYSER :\n{pdf_text[:12000]}"
+    )
+
+    response = claude.messages.create(
+        model=CLAUDE_MODEL,
+        max_tokens=2048,
+        temperature=0.0,
+        system="Tu es un robot JSON.",
+        messages=[{"role": "user", "content": prompt}]
+    )
+    reponse_texte = response.content[0].text.strip()
+    return _extract_json_obj(reponse_texte)
+
 
 @app.route("/ai/remplir-document", methods=["POST"])
 def ai_remplir_document():
@@ -868,51 +916,7 @@ def ai_remplir_document():
                 if sfpc_form:
                     ai_mapping = _build_sfpc_mapping(profil, justifs)
                 else:
-                    prompt = (
-                        "Tu es un data-entry bot strict expert en traitement de formulaires.\n"
-                        "Voici le texte brut d'un formulaire PDF vierge que tu dois remplir.\n"
-                        f"PROFIL UTILISATEUR : {json.dumps(profil, ensure_ascii=False)}\n"
-                        f"JUSTIFICATIFS A INJECTER : {json.dumps(justifs, ensure_ascii=False)}\n\n"
-                        "INSTRUCTIONS CRUCIALES :\n"
-                        "1. Remplis UNIQUEMENT les zones de saisie prévues (lignes pointillées, champs vides, tableau 'Catégories/Montant').\n"
-                        "2. NE REMPLIS JAMAIS les paragraphes d'instruction en haut du PDF (ex: 'remboursement maximum', 'si vous voyagez en...').\n"
-                        "3. Rends UNIQUEMENT un objet JSON valide. Pas de markdown, de bonjour ou d'explications.\n"
-                        "4. Les clés json sont les textes EXACTS (incluant la ponctuation comme ':') situés juste avant la zone à remplir (ex: 'Nom :', 'Prénom :', 'Train'). Ne coupe pas les ':'.\n"
-                        "5. Chaque valeur est un objet { \"val\": \"...\", \"type\": \"...\", \"col_header\": \"...\" }\n\n"
-                        "TYPES D'ALIGNEMENT ('type') :\n"
-                        "- 'right' : champ texte classique (ex: 'Nom :', 'Ville :').\n"
-                        "- 'check' : pour cocher une case (ex: '□ M.'). La valeur doit être 'X'.\n"
-                        "- 'column' : pour un tableau de dépenses (ex: étiquette 'Train' ou 'Avion', provenant des JUSTIFICATIFS). col_header doit être l'en-tête de colonne ('Montant').\n\n"
-                        "Exemple de réponse attendue :\n"
-                        "{\n"
-                        "  \"Nom :\": {\"val\": \"Dupont\", \"type\": \"right\"},\n"
-                        "  \"□ M.\": {\"val\": \"X\", \"type\": \"check\"},\n"
-                        "  \"Train\": {\"val\": \"350\", \"type\": \"column\", \"col_header\": \"Montant\"}\n"
-                        "}\n\n"
-                        f"TEXTE DU PDF À ANALYSER :\n{pdf_text[:12000]}"
-                    )
-
-                    response = claude.messages.create(
-                        model=CLAUDE_MODEL,
-                        max_tokens=2048,
-                        temperature=0.0,
-                        system="Tu es un robot JSON.",
-                        messages=[{"role": "user", "content": prompt}]
-                    )
-
-                    reponse_texte = response.content[0].text.strip()
-                    if reponse_texte.startswith("```json"):
-                        reponse_texte = reponse_texte.replace("```json", "", 1)
-                    if reponse_texte.endswith("```"):
-                        reponse_texte = reponse_texte[:-3]
-
-                    cleaned_response = reponse_texte.strip()
-                    json_start = cleaned_response.find("{")
-                    json_end = cleaned_response.rfind("}")
-                    if json_start == -1 or json_end == -1 or json_end <= json_start:
-                        raise ValueError("Réponse IA non exploitable (JSON introuvable)")
-
-                    ai_mapping = json.loads(cleaned_response[json_start:json_end + 1])
+                    ai_mapping = _build_llm_pdf_mapping(pdf_text, profil, justifs)
                 print("MAPPING PDF INTELLIGENT TROUVÉ: ", ai_mapping)
 
                 def _pick_anchor(rects, page_height):
