@@ -677,6 +677,100 @@ def _convert_docx_to_pdf(docx_bytes: bytes, nom_fich: str) -> bytes:
         with open(pdf_files[0], "rb") as f:
             return f.read()
 
+def _safe_float(val):
+    try:
+        if isinstance(val, str):
+            cleaned = val.replace("€", "").replace("EUR", "").replace(" ", "").replace(",", ".")
+            return float(cleaned)
+        return float(val)
+    except Exception:
+        return 0.0
+
+def _parse_fr_date(value):
+    from datetime import datetime
+    if not value:
+        return None
+    txt = str(value).strip()
+    for fmt in ("%d/%m/%Y", "%d/%m/%y", "%Y-%m-%d"):
+        try:
+            return datetime.strptime(txt, fmt)
+        except Exception:
+            continue
+    return None
+
+def _build_sfpc_mapping(profil, justifs):
+    """Construit un mapping robuste pour le formulaire SFPC sans dépendre du LLM."""
+    mapping = {}
+
+    civilite = (profil.get("civilite") or "").lower()
+    if civilite.startswith("m.") or civilite == "m":
+        mapping["□ M."] = {"val": "X", "type": "check"}
+    elif "mme" in civilite or "madame" in civilite:
+        mapping["□ Mme"] = {"val": "X", "type": "check"}
+    else:
+        mapping["□ Mlle"] = {"val": "X", "type": "check"}
+
+    nom = (profil.get("nom") or "").strip()
+    prenom = (profil.get("prenom") or "").strip()
+    if nom:
+        mapping["Nom :"] = {"val": nom.upper(), "type": "right"}
+    if prenom:
+        mapping["Prénom :"] = {"val": prenom, "type": "right"}
+    if profil.get("ville"):
+        mapping["Ville :"] = {"val": profil.get("ville"), "type": "right"}
+    if profil.get("telephone"):
+        mapping["Téléphone :"] = {"val": profil.get("telephone"), "type": "right"}
+    if profil.get("email"):
+        mapping["E-mail :"] = {"val": profil.get("email"), "type": "right"}
+
+    totals = {"Train": 0.0, "Avion": 0.0, "Taxi": 0.0, "Péage": 0.0, "Autre": 0.0}
+    date_candidates = []
+    origin = ""
+    destination = ""
+    type_to_cat = {
+        "billet_train": "Train",
+        "billet_avion": "Avion",
+        "taxi": "Taxi",
+        "peage": "Péage",
+        "facture_hotel": "Autre",
+        "autre": "Autre",
+    }
+
+    for j in justifs or []:
+        infos = j.get("informations", {}) if isinstance(j, dict) else {}
+        cat = type_to_cat.get((j.get("type_document") or "").lower(), "Autre") if isinstance(j, dict) else "Autre"
+        totals[cat] += _safe_float(infos.get("montant", 0))
+
+        dt = _parse_fr_date(infos.get("date"))
+        if dt:
+            date_candidates.append(dt)
+        if not origin and infos.get("origine"):
+            origin = str(infos.get("origine"))
+        if not destination and infos.get("destination"):
+            destination = str(infos.get("destination"))
+
+    if date_candidates:
+        date_depart = min(date_candidates).strftime("%d/%m/%y")
+        date_arrivee = max(date_candidates).strftime("%d/%m/%y")
+        mapping["Départ (jj/mm/aa)"] = {"val": date_depart, "type": "right"}
+        mapping["Arrivé (jj/mm/aa)"] = {"val": date_arrivee, "type": "right"}
+    if origin:
+        mapping["Départ (jj/mm/aa)"] = {"val": f"{mapping.get('Départ (jj/mm/aa)', {}).get('val', '')} {origin}".strip(), "type": "right"}
+    if destination:
+        mapping["Arrivé (jj/mm/aa)"] = {"val": f"{mapping.get('Arrivé (jj/mm/aa)', {}).get('val', '')} {destination}".strip(), "type": "right"}
+
+    total_general = 0.0
+    for cat, amount in totals.items():
+        if amount > 0:
+            amount_txt = f"{amount:.2f}".replace(".", ",")
+            mapping[cat] = {"val": amount_txt, "type": "column", "col_header": "Montant"}
+            total_general += amount
+
+    if total_general > 0:
+        mapping["Montant total"] = {"val": f"{total_general:.2f}".replace(".", ","), "type": "column", "col_header": "Montant"}
+
+    return mapping
+
 
 @app.route("/ai/remplir-document", methods=["POST"])
 def ai_remplir_document():
@@ -728,81 +822,130 @@ def ai_remplir_document():
                 pdf_text = ""
                 for page in doc_pdf:
                     pdf_text += page.get_text("text") + "\n"
-                
-                prompt = (
-                    "Tu es un data-entry bot strict expert en traitement de formulaires.\n"
-                    "Voici le texte brut d'un formulaire PDF vierge que tu dois remplir.\n"
-                    f"PROFIL UTILISATEUR : {json.dumps(profil, ensure_ascii=False)}\n"
-                    f"JUSTIFICATIFS A INJECTER : {json.dumps(justifs, ensure_ascii=False)}\n\n"
-                    "INSTRUCTIONS CRUCIALES :\n"
-                    "1. Remplis UNIQUEMENT les zones de saisie prévues (lignes pointillées, champs vides, tableau 'Catégories/Montant').\n"
-                    "2. NE REMPLIS JAMAIS les paragraphes d'instruction en haut du PDF (ex: 'remboursement maximum', 'si vous voyagez en...').\n"
-                    "3. Rends UNIQUEMENT un objet JSON valide. Pas de markdown, de bonjour ou d'explications.\n"
-                    "4. Les clés json sont les textes EXACTS (incluant la ponctuation comme ':') situés juste avant la zone à remplir (ex: 'Nom :', 'Prénom :', 'Train'). Ne coupe pas les ':'.\n"
-                    "5. Chaque valeur est un objet { \"val\": \"...\", \"type\": \"...\", \"col_header\": \"...\" }\n\n"
-                    "TYPES D'ALIGNEMENT ('type') :\n"
-                    "- 'right' : champ texte classique (ex: 'Nom :', 'Ville :').\n"
-                    "- 'check' : pour cocher une case (ex: '□ M.'). La valeur doit être 'X'.\n"
-                    "- 'column' : pour un tableau de dépenses (ex: étiquette 'Train' ou 'Avion', provenant des JUSTIFICATIFS). col_header doit être l'en-tête de colonne ('Montant').\n\n"
-                    "Exemple de réponse attendue :\n"
-                    "{\n"
-                    "  \"Nom :\": {\"val\": \"Dupont\", \"type\": \"right\"},\n"
-                    "  \"□ M.\": {\"val\": \"X\", \"type\": \"check\"},\n"
-                    "  \"Train\": {\"val\": \"350\", \"type\": \"column\", \"col_header\": \"Montant\"}\n"
-                    "}\n\n"
-                    f"TEXTE DU PDF À ANALYSER :\n{pdf_text[:12000]}"
-                )
-                
-                response = claude.messages.create(
-                    model=CLAUDE_MODEL,
-                    max_tokens=2048,
-                    temperature=0.0,
-                    system="Tu es un robot JSON.",
-                    messages=[{"role": "user", "content": prompt}]
-                )
-                
-                reponse_texte = response.content[0].text.strip()
-                if reponse_texte.startswith("```json"):
-                    reponse_texte = reponse_texte.replace("```json", "", 1)
-                if reponse_texte.endswith("```"):
-                    reponse_texte = reponse_texte[:-3]
-                
-                ai_mapping = json.loads(reponse_texte.strip())
+
+                # Formulaire SFPC connu : on applique un mapping déterministe (plus fiable que LLM)
+                sfpc_form = ("FORMULAIRE DE REMBOURSEMENT" in pdf_text and "CONGRÈS SFPC" in pdf_text)
+                if sfpc_form:
+                    ai_mapping = _build_sfpc_mapping(profil, justifs)
+                else:
+                    prompt = (
+                        "Tu es un data-entry bot strict expert en traitement de formulaires.\n"
+                        "Voici le texte brut d'un formulaire PDF vierge que tu dois remplir.\n"
+                        f"PROFIL UTILISATEUR : {json.dumps(profil, ensure_ascii=False)}\n"
+                        f"JUSTIFICATIFS A INJECTER : {json.dumps(justifs, ensure_ascii=False)}\n\n"
+                        "INSTRUCTIONS CRUCIALES :\n"
+                        "1. Remplis UNIQUEMENT les zones de saisie prévues (lignes pointillées, champs vides, tableau 'Catégories/Montant').\n"
+                        "2. NE REMPLIS JAMAIS les paragraphes d'instruction en haut du PDF (ex: 'remboursement maximum', 'si vous voyagez en...').\n"
+                        "3. Rends UNIQUEMENT un objet JSON valide. Pas de markdown, de bonjour ou d'explications.\n"
+                        "4. Les clés json sont les textes EXACTS (incluant la ponctuation comme ':') situés juste avant la zone à remplir (ex: 'Nom :', 'Prénom :', 'Train'). Ne coupe pas les ':'.\n"
+                        "5. Chaque valeur est un objet { \"val\": \"...\", \"type\": \"...\", \"col_header\": \"...\" }\n\n"
+                        "TYPES D'ALIGNEMENT ('type') :\n"
+                        "- 'right' : champ texte classique (ex: 'Nom :', 'Ville :').\n"
+                        "- 'check' : pour cocher une case (ex: '□ M.'). La valeur doit être 'X'.\n"
+                        "- 'column' : pour un tableau de dépenses (ex: étiquette 'Train' ou 'Avion', provenant des JUSTIFICATIFS). col_header doit être l'en-tête de colonne ('Montant').\n\n"
+                        "Exemple de réponse attendue :\n"
+                        "{\n"
+                        "  \"Nom :\": {\"val\": \"Dupont\", \"type\": \"right\"},\n"
+                        "  \"□ M.\": {\"val\": \"X\", \"type\": \"check\"},\n"
+                        "  \"Train\": {\"val\": \"350\", \"type\": \"column\", \"col_header\": \"Montant\"}\n"
+                        "}\n\n"
+                        f"TEXTE DU PDF À ANALYSER :\n{pdf_text[:12000]}"
+                    )
+
+                    response = claude.messages.create(
+                        model=CLAUDE_MODEL,
+                        max_tokens=2048,
+                        temperature=0.0,
+                        system="Tu es un robot JSON.",
+                        messages=[{"role": "user", "content": prompt}]
+                    )
+
+                    reponse_texte = response.content[0].text.strip()
+                    if reponse_texte.startswith("```json"):
+                        reponse_texte = reponse_texte.replace("```json", "", 1)
+                    if reponse_texte.endswith("```"):
+                        reponse_texte = reponse_texte[:-3]
+
+                    cleaned_response = reponse_texte.strip()
+                    json_start = cleaned_response.find("{")
+                    json_end = cleaned_response.rfind("}")
+                    if json_start == -1 or json_end == -1 or json_end <= json_start:
+                        raise ValueError("Réponse IA non exploitable (JSON introuvable)")
+
+                    ai_mapping = json.loads(cleaned_response[json_start:json_end + 1])
                 print("MAPPING PDF INTELLIGENT TROUVÉ: ", ai_mapping)
-                
+
+                def _pick_anchor(rects, page_height):
+                    """Priorise les occurrences les plus basses (zone formulaire)."""
+                    if not rects:
+                        return None
+                    rects_sorted = sorted(rects, key=lambda rr: rr.y0)
+                    bottom_half = [rr for rr in rects_sorted if rr.y0 > page_height * 0.35]
+                    return (bottom_half[-1] if bottom_half else rects_sorted[-1])
+
                 for page_num in range(doc_pdf.page_count):
                     page = doc_pdf[page_num]
+                    page_height = page.rect.height
+
+                    # Index des labels trouvés sur la page pour limiter les chevauchements
+                    anchors = []
+                    for label, config in ai_mapping.items():
+                        if not isinstance(config, dict):
+                            continue
+                        rects = page.search_for(str(label))
+                        anchor = _pick_anchor(rects, page_height)
+                        if anchor is not None:
+                            anchors.append((label, anchor))
+
                     for label, config in ai_mapping.items():
                         if not isinstance(config, dict) or "val" not in config:
                             continue
-                        
+
                         tval = config.get("val", "")
                         atype = config.get("type", "right")
-                        if not tval: continue
-                        
+                        if not tval:
+                            continue
+
                         rects = page.search_for(str(label))
-                        if rects:
-                            # TRES IMPORTANT: On ne prend QUE la dernière occurrence du mot sur la page.
-                            # Les formulaires placent quasiment toujours les instructions (textes explicatifs) 
-                            # en haut de la page, et les vrais champs de saisie ou tableaux tout en bas.
-                            r = rects[-1]
-                            
-                            if atype == "check":
-                                page.insert_text((r.x0 + 1, r.y1 - 2), "X", fontsize=12, color=(0, 0, 0.6))
-                            elif atype == "column":
-                                col_header = config.get("col_header", "")
-                                col_x = r.x1 + 80
-                                if col_header:
-                                    h_rects = page.search_for(str(col_header))
-                                    if h_rects:
-                                        # Prendre aussi le dernier header s'il y en a plusieurs
-                                        h_r = h_rects[-1]
-                                        col_x = (h_r.x0 + h_r.x1) / 2 - 10
-                                page.insert_text((col_x, r.y1 - 1), str(tval), fontsize=10, color=(0, 0, 0.6))
-                            else:
-                                # increased padding to +35 to avoid colon / space overlap if label missed dots
-                                page.insert_text((r.x1 + 35, r.y1 - 1), str(tval), fontsize=10, color=(0, 0, 0.6))
-                                
+                        r = _pick_anchor(rects, page_height)
+                        if not r:
+                            continue
+
+                        if atype == "check":
+                            page.insert_text((r.x0 + 1, r.y1 - 2), "X", fontsize=12, color=(0, 0, 0.6))
+                            continue
+
+                        if atype == "column":
+                            col_header = config.get("col_header", "")
+                            col_x = r.x1 + 80
+                            if col_header:
+                                h_rects = page.search_for(str(col_header))
+                                h_r = _pick_anchor(h_rects, page_height)
+                                if h_r:
+                                    col_x = (h_r.x0 + h_r.x1) / 2 - 10
+                            page.insert_text((col_x, r.y1 - 1), str(tval), fontsize=10, color=(0, 0, 0.6))
+                            continue
+
+                        # "right" : écrire juste après le label, sans empiéter sur un label voisin.
+                        baseline = (r.y0 + r.y1) / 2
+                        right_neighbors = [
+                            a for a_label, a in anchors
+                            if a_label != label
+                            and abs(((a.y0 + a.y1) / 2) - baseline) < 6
+                            and a.x0 > r.x1
+                        ]
+                        next_x = min((a.x0 for a in right_neighbors), default=page.rect.width - 25)
+                        start_x = r.x1 + 6
+                        end_x = max(start_x + 40, next_x - 4)
+                        target_rect = fitz.Rect(start_x, r.y0 - 1, end_x, r.y1 + 2)
+                        page.insert_textbox(
+                            target_rect,
+                            str(tval),
+                            fontsize=10,
+                            color=(0, 0, 0.6),
+                            align=0,
+                        )
+
                 pdf_buf = io.BytesIO(doc_pdf.write())
                 doc_pdf.close()
                 pdf_buf.seek(0)
