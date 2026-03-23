@@ -640,6 +640,23 @@ def _convert_doc_to_docx(doc_bytes: bytes, nom_fich: str) -> bytes:
             raise RuntimeError("Conversion LibreOffice : aucun .docx produit")
         with open(docx_files[0], "rb") as f:
             return f.read()
+def _force_pdf_to_docx(pdf_bytes: bytes, nom_fich: str) -> bytes:
+    import tempfile, os
+    from pdf2docx import Converter
+    with tempfile.TemporaryDirectory() as tmpdir:
+        pdf_path = os.path.join(tmpdir, "input.pdf")
+        docx_path = os.path.join(tmpdir, "output.docx")
+        with open(pdf_path, "wb") as f:
+            f.write(pdf_bytes)
+        
+        cv = Converter(pdf_path)
+        cv.convert(docx_path)
+        cv.close()
+        
+        with open(docx_path, "rb") as f:
+            return f.read()
+
+
 def _convert_docx_to_pdf(docx_bytes: bytes, nom_fich: str) -> bytes:
     """Convertit un .docx en .pdf via LibreOffice headless."""
     import subprocess, tempfile, glob, os
