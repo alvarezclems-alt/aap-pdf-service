@@ -719,9 +719,16 @@ def ai_remplir_document():
 
         ext = os.path.splitext(nom_fich)[1].lower()
         if ext == ".pdf":
-            return jsonify({"error": "Veuillez fournir un modèle vierge en Word (.docx ou .doc) (pas de PDF). L'IA remplira le Word et vous génèrera un PDF complété magiquement !"}), 400
-
-        if ext == ".doc":
+            print(f"Conversion super-puissante .pdf → .docx : {nom_fich}")
+            try:
+                docx_bytes = _force_pdf_to_docx(raw_bytes, nom_fich)
+                nom_fich = os.path.splitext(nom_fich)[0] + ".docx"
+            except Exception as conv_err:
+                print(f"WARNING: Conversion PDF vers Word échouée: {conv_err}")
+                return jsonify({
+                    "error": "Impossible de lire ce PDF. Veuillez essayer avec un autre fichier ou un format Word."
+                }), 422
+        elif ext == ".doc":
             print(f"Conversion .doc → .docx : {nom_fich}")
             try:
                 docx_bytes = _convert_doc_to_docx(raw_bytes, nom_fich)
