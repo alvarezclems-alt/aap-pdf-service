@@ -729,22 +729,33 @@ def ai_remplir_document():
                     pdf_text += page.get_text("text") + "\n"
                 
                 prompt = (
-                    "Voici le texte brut d'un formulaire PDF.\n"
-                    "Ton but est de déduire quelles informations doivent être écrites à côté de quelles étiquettes.\n"
-                    f"Voici les données du profil utilisateur : {json.dumps(profil, ensure_ascii=False)}\n\n"
-                    "Règles:\n"
-                    "1. Recherche les étiquettes EXACTES dans le texte (ex: 'Nom :', 'Prénom :', 'Ville :').\n"
-                    "2. Renvoie UNIQUEMENT un objet JSON valide, sans aucune explication avant ni après.\n"
-                    "3. Les clés du JSON doivent être les étiquettes ou cases (ex: '□ M.' ou 'q M.') EXACTES telles qu'elles apparaissent dans le texte !\n"
-                    "4. Les valeurs du JSON doivent être les textes à insérer. Pour cocher une case, mets 'X'.\n\n"
-                    f"Texte du PDF à analyser :\n{pdf_text[:10000]}"
+                    "Tu es un data-entry bot strict expert en traitement de formulaires.\n"
+                    "Voici le texte brut d'un formulaire PDF vierge que tu dois remplir.\n"
+                    f"PROFIL UTILISATEUR : {json.dumps(profil, ensure_ascii=False)}\n\n"
+                    "INSTRUCTIONS CRUCIALES :\n"
+                    "1. Remplis UNIQUEMENT les zones de saisie prévues (lignes pointillées, champs vides, tableau 'Catégories/Montant').\n"
+                    "2. NE REMPLIS JAMAIS les paragraphes d'instruction en haut du PDF (ex: 'remboursement maximum', 'si vous voyagez en...').\n"
+                    "3. Rends UNIQUEMENT un objet JSON valide. Pas de markdown, de bonjour ou d'explications.\n"
+                    "4. Les clés json sont les textes EXACTS situés juste avant la zone à remplir (ex: 'Nom :', 'Prénom :', 'Train').\n"
+                    "5. Chaque valeur est un objet { \"val\": \"...\", \"type\": \"...\", \"col_header\": \"...\" }\n\n"
+                    "TYPES D'ALIGNEMENT ('type') :\n"
+                    "- 'right' : champ texte classique (ex: 'Nom :', 'Ville :').\n"
+                    "- 'check' : pour cocher une case (ex: '□ M.'). La valeur doit être 'X'.\n"
+                    "- 'column' : pour un tableau de dépenses (ex: étiquette 'Train' ou 'Avion'). col_header doit être l'en-tête de colonne ('Montant').\n\n"
+                    "Exemple de réponse attendue :\n"
+                    "{\n"
+                    "  \"Nom :\": {\"val\": \"Dupont\", \"type\": \"right\"},\n"
+                    "  \"□ M.\": {\"val\": \"X\", \"type\": \"check\"},\n"
+                    "  \"Train\": {\"val\": \"350\", \"type\": \"column\", \"col_header\": \"Montant\"}\n"
+                    "}\n\n"
+                    f"TEXTE DU PDF À ANALYSER :\n{pdf_text[:12000]}"
                 )
                 
                 response = claude.messages.create(
                     model=CLAUDE_MODEL,
                     max_tokens=2048,
                     temperature=0.0,
-                    system="Tu es un robot qui ne répond que par un objet JSON valide (aucun commentaire ni balise markdown).",
+                    system="Tu es un robot JSON.",
                     messages=[{"role": "user", "content": prompt}]
                 )
                 
@@ -755,19 +766,33 @@ def ai_remplir_document():
                     reponse_texte = reponse_texte[:-3]
                 
                 ai_mapping = json.loads(reponse_texte.strip())
-                print("MAPPING PDF TROUVÉ: ", ai_mapping)
+                print("MAPPING PDF INTELLIGENT TROUVÉ: ", ai_mapping)
                 
-                for page in doc_pdf:
-                    for label, tval in ai_mapping.items():
+                for page_num in range(doc_pdf.page_count):
+                    page = doc_pdf[page_num]
+                    for label, config in ai_mapping.items():
+                        if not isinstance(config, dict) or "val" not in config:
+                            continue
+                        
+                        tval = config.get("val", "")
+                        atype = config.get("type", "right")
                         if not tval: continue
+                        
                         rects = page.search_for(str(label))
                         for r in rects:
-                            if "□" in str(label) or "q " in str(label):
-                                # Cocher la case (tampon X)
+                            if atype == "check":
                                 page.insert_text((r.x0 + 1, r.y1 - 2), "X", fontsize=12, color=(0, 0, 0.6))
+                            elif atype == "column":
+                                col_header = config.get("col_header", "")
+                                col_x = r.x1 + 80
+                                if col_header:
+                                    h_rects = page.search_for(str(col_header))
+                                    if h_rects:
+                                        h_r = h_rects[0]
+                                        col_x = (h_r.x0 + h_r.x1) / 2 - 10
+                                page.insert_text((col_x, r.y1 - 1), str(tval), fontsize=10, color=(0, 0, 0.6))
                             else:
-                                # Écrire la valeur à droite de l'étiquette
-                                page.insert_text((r.x1 + 4, r.y1 - 1), str(tval), fontsize=10, color=(0, 0, 0.6))
+                                page.insert_text((r.x1 + 6, r.y1 - 1), str(tval), fontsize=10, color=(0, 0, 0.6))
                                 
                 pdf_buf = io.BytesIO(doc_pdf.write())
                 doc_pdf.close()
