@@ -860,7 +860,7 @@ def ai_remplir_document():
                 for j in billets_train
                 if j.get("informations", {}).get("date")
             ]
-            profil_enrichi["frais_train"] = str(total_train)
+            profil_enrichi["frais_train"] = f"{total_train:.2f}"
             if dates_train:
                 profil_enrichi["date_depart"] = dates_train[0]
                 profil_enrichi["date_arrivee"] = dates_train[-1]
@@ -946,6 +946,23 @@ Règles IMPORTANTES pour identifier les champs à remplir :
 
 La règle clé : si supprimer le texte existant rendrait le document incompréhensible,
 NE PAS modifier cette cellule.
+
+RÈGLE CRITIQUE pour les tableaux de transport :
+Le tableau VOYAGE a 2 colonnes :
+  - Colonne gauche = labels (NE PAS MODIFIER)
+  - Colonne droite = montants (REMPLIR ICI)
+Les labels 'Train', 'Avion', 'Taxi', 'Péage',
+'Voiture personnel', 'Montant total' sont des
+libellés fixes — NE JAMAIS les modifier.
+Pour remplir un montant, identifier la ligne
+correspondant au label dans la colonne GAUCHE,
+puis remplir UNIQUEMENT la cellule de droite
+sur la MÊME ligne.
+Exemple correct :
+- Ligne 'Train' → colonne droite = '{profil_enrichi.get("frais_train", "0.00")} Euros'
+- Ligne 'Avion' → colonne droite = vide si pas de vol
+- Ligne 'Montant total' → colonne droite = total
+NE PAS écrire de chiffres dans la colonne gauche.
 
 Règles supplémentaires :
 3. Pour le champ Adresse qui contient "N°... Bât... Rue..." :
@@ -1116,14 +1133,19 @@ def ai_analyser_document():
 
         # Extraire les infos utiles des justificatifs
         infos_justifs = {}
+        billets_train_analyse = [j for j in justifs if j.get("type_document") == "billet_train"]
+        if billets_train_analyse:
+            total_train_analyse = sum(
+                float(j.get("informations", {}).get("montant") or 0)
+                for j in billets_train_analyse
+            )
+            infos_justifs["frais_train"] = f"{total_train_analyse:.2f}"
+            dates = [j.get("informations", {}).get("date") for j in billets_train_analyse if j.get("informations", {}).get("date")]
+            if dates:
+                infos_justifs["date_depart"] = dates[0]
         for j in justifs:
             info = j.get("informations", {})
             type_doc = j.get("type_document", "")
-            if type_doc == "billet_train":
-                if info.get("montant") is not None:
-                    infos_justifs["frais_train"] = info.get("montant")
-                if info.get("date"):
-                    infos_justifs["date_depart"] = info.get("date")
             if type_doc == "rib":
                 if info.get("iban"):
                     infos_justifs["iban"] = info.get("iban")
