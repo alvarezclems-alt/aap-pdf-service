@@ -615,6 +615,28 @@ def _decomposer_adresse(adresse: str):
     return "", adresse
 
 
+def _convert_pdf_to_docx(pdf_bytes: bytes, nom_fich: str) -> bytes:
+    """Convertit un PDF en DOCX via LibreOffice headless."""
+    import subprocess, tempfile, glob
+    with tempfile.TemporaryDirectory() as tmpdir:
+        input_path = os.path.join(tmpdir, nom_fich)
+        with open(input_path, "wb") as f:
+            f.write(pdf_bytes)
+        result = subprocess.run(
+            ["libreoffice", "--headless",
+             "--convert-to", "docx",
+             "--outdir", tmpdir, input_path],
+            capture_output=True, text=True, timeout=60
+        )
+        if result.returncode != 0:
+            raise RuntimeError(f"LibreOffice erreur: {result.stderr}")
+        docx_files = glob.glob(os.path.join(tmpdir, "*.docx"))
+        if not docx_files:
+            raise RuntimeError("Conversion PDF→DOCX : aucun fichier produit")
+        with open(docx_files[0], "rb") as f:
+            return f.read()
+
+
 def _convert_doc_to_docx(doc_bytes: bytes, nom_fich: str) -> bytes:
     """Convertit un .doc en .docx via LibreOffice headless."""
     import subprocess, tempfile, glob, os
@@ -721,103 +743,13 @@ def ai_remplir_document():
 
         ext = os.path.splitext(nom_fich)[1].lower()
         if ext == ".pdf":
-            print(f"Surimpression PDF natif activée : {nom_fich}")
-            import fitz
-            import json
+            print(f"Conversion PDF → DOCX : {nom_fich}")
             try:
-                doc_pdf = fitz.open(stream=raw_bytes, filetype="pdf")
-                pdf_text = ""
-                for page in doc_pdf:
-                    pdf_text += page.get_text("text") + "\n"
-                
-                prompt = (
-                    "Tu es un data-entry bot strict expert en traitement de formulaires.\n"
-                    "Voici le texte brut d'un formulaire PDF vierge que tu dois remplir.\n"
-                    f"PROFIL UTILISATEUR : {json.dumps(profil, ensure_ascii=False)}\n"
-                    f"JUSTIFICATIFS A INJECTER : {json.dumps(justifs, ensure_ascii=False)}\n\n"
-                    "INSTRUCTIONS CRUCIALES :\n"
-                    "1. Remplis UNIQUEMENT les zones de saisie prévues (lignes pointillées, champs vides, tableau 'Catégories/Montant').\n"
-                    "2. NE REMPLIS JAMAIS les paragraphes d'instruction en haut du PDF (ex: 'remboursement maximum', 'si vous voyagez en...').\n"
-                    "3. Rends UNIQUEMENT un objet JSON valide. Pas de markdown, de bonjour ou d'explications.\n"
-                    "4. Les clés json sont les textes EXACTS (incluant la ponctuation comme ':') situés juste avant la zone à remplir (ex: 'Nom :', 'Prénom :', 'Train'). Ne coupe pas les ':'.\n"
-                    "5. Chaque valeur est un objet { \"val\": \"...\", \"type\": \"...\", \"col_header\": \"...\" }\n\n"
-                    "TYPES D'ALIGNEMENT ('type') :\n"
-                    "- 'right' : champ texte classique (ex: 'Nom :', 'Ville :').\n"
-                    "- 'check' : pour cocher une case (ex: '□ M.'). La valeur doit être 'X'.\n"
-                    "- 'column' : pour un tableau de dépenses (ex: étiquette 'Train' ou 'Avion', provenant des JUSTIFICATIFS). col_header doit être l'en-tête de colonne ('Montant').\n\n"
-                    "Exemple de réponse attendue :\n"
-                    "{\n"
-                    "  \"Nom :\": {\"val\": \"Dupont\", \"type\": \"right\"},\n"
-                    "  \"□ M.\": {\"val\": \"X\", \"type\": \"check\"},\n"
-                    "  \"Train\": {\"val\": \"350\", \"type\": \"column\", \"col_header\": \"Montant\"}\n"
-                    "}\n\n"
-                    f"TEXTE DU PDF À ANALYSER :\n{pdf_text[:12000]}"
-                )
-                
-                response = claude.messages.create(
-                    model=CLAUDE_MODEL,
-                    max_tokens=2048,
-                    temperature=0.0,
-                    system="Tu es un robot JSON.",
-                    messages=[{"role": "user", "content": prompt}]
-                )
-                
-                reponse_texte = response.content[0].text.strip()
-                if reponse_texte.startswith("```json"):
-                    reponse_texte = reponse_texte.replace("```json", "", 1)
-                if reponse_texte.endswith("```"):
-                    reponse_texte = reponse_texte[:-3]
-                
-                ai_mapping = json.loads(reponse_texte.strip())
-                print("MAPPING PDF INTELLIGENT TROUVÉ: ", ai_mapping)
-                
-                for page_num in range(doc_pdf.page_count):
-                    page = doc_pdf[page_num]
-                    for label, config in ai_mapping.items():
-                        if not isinstance(config, dict) or "val" not in config:
-                            continue
-                        
-                        tval = config.get("val", "")
-                        atype = config.get("type", "right")
-                        if not tval: continue
-                        
-                        rects = page.search_for(str(label))
-                        if rects:
-                            # TRES IMPORTANT: On ne prend QUE la dernière occurrence du mot sur la page.
-                            # Les formulaires placent quasiment toujours les instructions (textes explicatifs) 
-                            # en haut de la page, et les vrais champs de saisie ou tableaux tout en bas.
-                            r = rects[-1]
-                            
-                            if atype == "check":
-                                page.insert_text((r.x0 + 1, r.y1 - 2), "X", fontsize=12, color=(0, 0, 0.6))
-                            elif atype == "column":
-                                col_header = config.get("col_header", "")
-                                col_x = r.x1 + 80
-                                if col_header:
-                                    h_rects = page.search_for(str(col_header))
-                                    if h_rects:
-                                        # Prendre aussi le dernier header s'il y en a plusieurs
-                                        h_r = h_rects[-1]
-                                        col_x = (h_r.x0 + h_r.x1) / 2 - 10
-                                page.insert_text((col_x, r.y1 - 1), str(tval), fontsize=10, color=(0, 0, 0.6))
-                            else:
-                                # increased padding to +35 to avoid colon / space overlap if label missed dots
-                                page.insert_text((r.x1 + 35, r.y1 - 1), str(tval), fontsize=10, color=(0, 0, 0.6))
-                                
-                pdf_buf = io.BytesIO(doc_pdf.write())
-                doc_pdf.close()
-                pdf_buf.seek(0)
-                
-                return send_file(
-                    pdf_buf,
-                    mimetype="application/pdf",
-                    as_attachment=True,
-                    download_name=nom_fich
-                )
-            except Exception as err:
-                print(f"WARNING: Erreur de surimpression PDF: {err}")
+                docx_bytes = _convert_pdf_to_docx(raw_bytes, nom_fich)
+                nom_fich   = os.path.splitext(nom_fich)[0] + ".docx"
+            except Exception as conv_err:
                 return jsonify({
-                    "error": f"Impossible d'imprimer sur ce PDF nativement : {err}"
+                    "error": f"Conversion PDF impossible: {conv_err}"
                 }), 422
         elif ext == ".doc":
             print(f"Conversion .doc → .docx : {nom_fich}")
