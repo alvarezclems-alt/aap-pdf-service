@@ -640,6 +640,7 @@ def _convert_doc_to_docx(doc_bytes: bytes, nom_fich: str) -> bytes:
             raise RuntimeError("Conversion LibreOffice : aucun .docx produit")
         with open(docx_files[0], "rb") as f:
             return f.read()
+
 def _force_pdf_to_docx(pdf_bytes: bytes, nom_fich: str) -> bytes:
     import tempfile, os
     from pdf2docx import Converter
@@ -861,6 +862,30 @@ def ai_remplir_document():
             f"[{i}] {t}" for i, t in enumerate(champs_doc)
         )[:5000]
 
+        # Construire le bloc justificatifs pour le prompt
+        justif_bloc = ""
+        if justifs:
+            justif_lines = "\n".join([
+                f"- {j.get('type_document','')}: "
+                f"{j.get('resume', '')} "
+                f"| montant: {j.get('informations',{}).get('montant','')}"
+                f" | date: {j.get('informations',{}).get('date','')}"
+                f" | trajet: {j.get('informations',{}).get('description','')}"
+                f" | IBAN: {j.get('informations',{}).get('iban','')}"
+                f" | BIC: {j.get('informations',{}).get('bic','')}"
+                for j in justifs
+            ])
+            justif_bloc = f"""
+Informations extraites des justificatifs fournis :
+{justif_lines}
+Utilise ces informations pour remplir les champs correspondants :
+- Dates de départ/arrivée → champs date
+- Montants train/avion/taxi → colonnes montant
+- Trajet → champs origine/destination
+- IBAN/BIC → coordonnées bancaires
+- Total → montant total du tableau
+"""
+
         system = (
             "Tu es un assistant expert en administration française. "
             "Tu analyses des documents administratifs et identifies "
@@ -875,22 +900,27 @@ def ai_remplir_document():
 
 Voici le profil de la personne :
 {json.dumps(profil_enrichi, ensure_ascii=False, indent=2)}
-
+{justif_bloc}
 Retourne un JSON où :
 - la clé est le numéro de ligne (ex: "4")
 - la valeur est le texte COMPLET de la ligne après remplissage
 
-Règles importantes :
-1. Remplis UNIQUEMENT les champs d'identification personnelle :
-   nom, prénom, adresse, date/lieu de naissance, email, téléphone,
-   nationalité, situation professionnelle, N° sécu, IBAN, SIRET,
-   situation de famille.
+Règles IMPORTANTES pour identifier les champs à remplir :
+✓ REMPLIR uniquement si la cellule/ligne contient :
+  - Des pointillés : ............. ou …………………
+  - Des tirets : ____________
+  - Est complètement vide
+  - Contient uniquement (jj/mm/aa) ou similaire
+✗ NE JAMAIS modifier si la cellule contient :
+  - Un label descriptif : 'Départ :', 'Train', 'Avion', 'Taxi', 'Catégories', 'Montant'
+  - Du texte qui décrit le champ lui-même
+  - Des instructions ou explications
+  - Des titres de colonnes ou de lignes
 
-2. Ne modifie JAMAIS les champs institutionnels :
-   structure/composante/direction, N° dossier, visa administratif,
-   cachet, signatures de responsables, intitulé du poste,
-   service RH, dates d'intervention fixées par l'institution.
+La règle clé : si supprimer le texte existant rendrait le document incompréhensible,
+NE PAS modifier cette cellule.
 
+Règles supplémentaires :
 3. Pour le champ Adresse qui contient "N°... Bât... Rue..." :
    - Utilise "numero_rue" pour le N°
    - Utilise "nom_rue" pour la Rue
