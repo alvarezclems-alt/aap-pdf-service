@@ -846,6 +846,33 @@ def ai_remplir_document():
             f"{profil.get('ville','')}".strip(", ")
         )
 
+        # ── Enrichir profil avec les infos des justificatifs ──────────────────
+        billets_train = [j for j in justifs if j.get("type_document") == "billet_train"]
+        rib = next((j for j in justifs if j.get("type_document") == "rib"), None)
+
+        if billets_train:
+            total_train = sum(
+                float(j.get("informations", {}).get("montant") or 0)
+                for j in billets_train
+            )
+            dates_train = [
+                j.get("informations", {}).get("date", "")
+                for j in billets_train
+                if j.get("informations", {}).get("date")
+            ]
+            profil_enrichi["frais_train"] = str(total_train)
+            if dates_train:
+                profil_enrichi["date_depart"] = dates_train[0]
+                profil_enrichi["date_arrivee"] = dates_train[-1]
+
+        if rib:
+            info_rib = rib.get("informations", {})
+            profil_enrichi["iban"]             = info_rib.get("iban", profil.get("iban", ""))
+            profil_enrichi["bic"]              = info_rib.get("bic", profil.get("bic", ""))
+            profil_enrichi["titulaire_compte"] = info_rib.get("titulaire", "")
+            profil_enrichi["banque_nom"]       = info_rib.get("banque", "La Banque Postale")
+            profil_enrichi["banque_adresse"]   = info_rib.get("adresse", "")
+
         # ── Construire la liste numérotée des paragraphes ─────────────────────
         champs_doc = []
         for para in doc.paragraphs:
@@ -1082,13 +1109,36 @@ def ai_analyser_document():
         d      = request.get_json(force=True) or {}
         texte  = d.get("texte_document", "")
         profil = d.get("profil_existant", {})
+        justifs = d.get("justificatifs", [])
 
         if not texte:
             return jsonify({"error": "texte_document manquant"}), 400
 
-        # Déterminer quels champs du profil sont déjà renseignés
+        # Extraire les infos utiles des justificatifs
+        infos_justifs = {}
+        for j in justifs:
+            info = j.get("informations", {})
+            type_doc = j.get("type_document", "")
+            if type_doc == "billet_train":
+                if info.get("montant") is not None:
+                    infos_justifs["frais_train"] = info.get("montant")
+                if info.get("date"):
+                    infos_justifs["date_depart"] = info.get("date")
+            if type_doc == "rib":
+                if info.get("iban"):
+                    infos_justifs["iban"] = info.get("iban")
+                if info.get("bic"):
+                    infos_justifs["bic"] = info.get("bic")
+                if info.get("titulaire"):
+                    infos_justifs["titulaire_compte"] = info.get("titulaire")
+                infos_justifs["banque_nom"] = info.get("banque", "La Banque Postale")
+
+        # Combiner profil + infos justificatifs
+        profil_complet = {**profil, **infos_justifs}
+
+        # Déterminer quels champs du profil complet sont déjà renseignés
         champs_profil_renseignes = {
-            k: v for k, v in profil.items()
+            k: v for k, v in profil_complet.items()
             if v and str(v).strip() not in ("", "null", "None")
         }
 
