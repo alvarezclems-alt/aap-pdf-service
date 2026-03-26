@@ -461,20 +461,32 @@ def ai_extraire_justificatif():
             return jsonify({"error": "Fichier manquant"}), 400
 
         system = (
-            "Tu es un expert comptable et administratif. "
-            "Tu analyses le fichier fourni (une facture, un billet, un RIB, etc.) "
-            "et tu retournes UNIQUEMENT un JSON valide, sans code avant ni après."
+            "Tu es un expert comptable et administratif français. "
+            "Tu analyses des justificatifs de voyage (billets SNCF, factures, RIB, etc.) "
+            "et tu retournes UNIQUEMENT un JSON valide, sans texte avant ni après, "
+            "sans balises markdown."
         )
-        user = f"""Analyse ce document ({nom}) et retourne un JSON avec cette structure :
+        user = f"""Analyse ce document ({nom}) qui peut contenir UN OU PLUSIEURS billets/trajets.
+
+RÈGLES IMPORTANTES :
+- Si le document contient PLUSIEURS billets ou trajets (ex: billet aller + billet retour, ou plusieurs pages),
+  additionne TOUS les montants et retourne le TOTAL dans "montant"
+- Pour les billets SNCF : type_document = "billet_train" (même pour TGV, Intercités, etc.)
+- La date doit être au format JJ/MM/AA (ex: 10/03/26)
+- Le montant doit être un nombre décimal sans symbole (ex: 112.00 et non "112,00 €")
+
+Retourne ce JSON (ne mets que les champs que tu trouves) :
 {{
-  "type_document": "Choisis parmi: billet_train, billet_avion, facture_hotel, taxi, peage, rib, autre",
-  "resume": "Courte description de 3-4 mots (ex: Billet SNCF Paris-Lyon, Facture Ibis, RIB)",
+  "type_document": "billet_train" | "billet_avion" | "facture_hotel" | "taxi" | "peage" | "rib" | "autre",
+  "resume": "Description courte (ex: Billets SNCF Tours-Nantes-Paris-Lille)",
   "informations": {{
-    "montant": Nombre flottant (ex: 45.50),
+    "montant": NOMBRE_TOTAL_FLOTTANT,
     "devise": "EUR",
-    "date": "JJ/MM/AAAA",
-    "origine": "Ville de départ",
-    "destination": "Ville d'arrivée",
+    "date": "JJ/MM/AA",
+    "origine": "Ville de départ du premier trajet",
+    "destination": "Ville d'arrivée du dernier trajet",
+    "nb_billets": NOMBRE_DE_BILLETS_DANS_LE_DOCUMENT,
+    "detail_montants": "ex: 36€ + 37€ = 73€",
     "iban": "FR...",
     "bic": "...",
     "titulaire": "Nom du titulaire"
@@ -731,26 +743,41 @@ Retourne un JSON avec la liste des insertions :
     {{
       "index_bloc": 5,
       "valeur": "ALVAREZ"
-    }},
-    {{
-      "index_bloc": 12,
-      "valeur": "Clément"
     }}
   ]
 }}
 
 RÈGLES ABSOLUES :
 1. "index_bloc" = index [N] du bloc qui contient les pointillés/zone vide
-2. "valeur" = UNIQUEMENT la donnée à insérer (jamais le label)
-   - Bloc "Nom :............." → valeur = "ALVAREZ" (pas "Nom : ALVAREZ")
-   - Bloc "Prénom : ………" → valeur = "Clément"
-   - Bloc "…………… Euros" sur la ligne Train → valeur = "56.00"
-3. JAMAIS modifier les blocs labels de tableau :
-   "Train", "Avion", "Taxi", "Péage", "Catégories", "Montant", "Voiture personnel"
-4. Pour les tableaux : identifier le bloc DROITE (x élevé) sur la même hauteur (y) que le label
-5. Pour les dates → format jj/mm/aa
-6. Pour les montants → juste le nombre (ex: "56.00")
-7. Ne pas inventer d'information absente du profil
+2. "valeur" = UNIQUEMENT la donnée à insérer (jamais le label ni les pointillés)
+
+MAPPING NOM/PRÉNOM — CRITIQUE :
+- Le champ "Nom" = profil["nom"] = NOM DE FAMILLE (ex: ALVAREZ)
+- Le champ "Prénom" = profil["prenom"] = PRÉNOM (ex: Clément)
+- Ces deux champs sont DISTINCTS, ne jamais mettre le prénom dans Nom ou vice-versa
+- Si le bloc contient "Nom :...." → valeur = profil["nom"] uniquement
+- Si le bloc contient "Prénom :..." → valeur = profil["prenom"] uniquement
+
+MAPPING TABLEAU VOYAGE — CRITIQUE :
+Le tableau a des labels à gauche et des montants à droite.
+Associe CHAQUE valeur au BON label selon le profil/justificatifs :
+- Ligne "Train" → colonne droite = profil["frais_train"] si disponible (JAMAIS dans "Autre")
+- Ligne "Avion" → colonne droite = profil["frais_avion"] si disponible
+- Ligne "Taxi" → colonne droite = profil["frais_taxi"] si disponible
+- Ligne "Péage" → colonne droite = profil["frais_peage"] si disponible
+- Ligne "Voiture personnel" → colonne droite = profil["frais_voiture"] si disponible
+- Ligne "Autre" → colonne droite = UNIQUEMENT si des frais "autre" existent (sinon laisser vide)
+- Ligne "Montant total" → colonne droite = profil["montant_total"] = SOMME de tous les frais
+- Ne jamais mettre le montant train dans la ligne "Autre"
+
+MAPPING DATES — CRITIQUE :
+- Ligne "Départ (jj/mm/aa)" → profil["date_depart"] au format jj/mm/aa
+- Ligne "Arrivée (jj/mm/aa)" → profil["date_arrivee"] au format jj/mm/aa
+
+AUTRES RÈGLES :
+3. JAMAIS modifier les blocs labels : "Train", "Avion", "Taxi", "Péage", "Catégories", "Montant", "Voiture personnel", "Autre", "Montant total"
+4. Pour les cases à cocher civilité (□ Pr □ Dr □ M. □ Mme □ Mlle) : cocher la bonne avec ☑
+5. Ne pas inventer d'information absente du profil
 
 JSON :"""
 
@@ -915,10 +942,21 @@ RÈGLES ABSOLUES :
 1. N'inclure QUE les index "VALEUR" ou "PARA" contenant des pointillés (......) ou zones vides
 2. JAMAIS inclure les index "LABEL" — ce sont les labels fixes du tableau
 3. "valeur" = UNIQUEMENT la donnée, PAS le texte complet :
-   - "Nom :............." → valeur = "ALVAREZ"  (PAS "Nom : ALVAREZ")
-   - "…………… Euros" (ligne Train) → valeur = "56.00"
-   - "(jj/mm/aa)" → valeur = "10/03/26"
-4. Pour les cellules VALEUR du tableau : insérer uniquement le montant numérique
+   - PARA "Nom :............." → valeur = profil["nom"] = NOM DE FAMILLE uniquement
+   - PARA "Prénom :............." → valeur = profil["prenom"] = PRÉNOM uniquement
+   - "(jj/mm/aa)" sur ligne Départ → valeur = profil["date_depart"] format jj/mm/aa
+   - "(jj/mm/aa)" sur ligne Arrivée → valeur = profil["date_arrivee"] format jj/mm/aa
+
+MAPPING TABLEAU VOYAGE — CRITIQUE :
+- VALEUR sur la même ligne que LABEL "Train" → profil["frais_train"] (JAMAIS dans Autre)
+- VALEUR sur la même ligne que LABEL "Avion" → profil["frais_avion"] si dispo
+- VALEUR sur la même ligne que LABEL "Taxi" → profil["frais_taxi"] si dispo
+- VALEUR sur la même ligne que LABEL "Péage" → profil["frais_peage"] si dispo
+- VALEUR sur la même ligne que LABEL "Voiture personnel" → profil["frais_voiture"] si dispo
+- VALEUR sur la même ligne que LABEL "Autre" → laisser vide sauf si frais "autre" existent
+- VALEUR sur la même ligne que LABEL "Montant total" → profil["montant_total"]
+
+4. Pour les cellules VALEUR du tableau : insérer uniquement le montant numérique (ex: "112.00")
 5. Ne pas inventer d'information absente du profil
 6. Si une info manque → ne pas inclure cet index
 
@@ -1027,22 +1065,91 @@ def ai_remplir_document():
             f"{profil.get('ville','')}".strip(", ")
         )
 
-        # Enrichir avec justificatifs
-        billets_train = [j for j in justifs if j.get("type_document") == "billet_train"]
+        # S'assurer que nom et prénom sont bien séparés (jamais fusionnés)
+        # Si le profil a "nom_complet", le décomposer
+        if profil_enrichi.get("nom_complet") and not profil_enrichi.get("nom"):
+            parts = profil_enrichi["nom_complet"].split(" ", 1)
+            profil_enrichi["prenom"] = parts[0] if len(parts) > 0 else ""
+            profil_enrichi["nom"] = parts[1] if len(parts) > 1 else ""
+
+        def _normaliser_date(d: str) -> str:
+            """Convertit JJ/MM/AAAA ou JJ/MM/YYYY vers jj/mm/aa."""
+            if not d:
+                return d
+            # Si format JJ/MM/AAAA → jj/mm/aa
+            import re as _re
+            m = _re.match(r'(\d{1,2})/(\d{2})/(\d{4})', d)
+            if m:
+                return f"{m.group(1).zfill(2)}/{m.group(2)}/{m.group(3)[2:]}"
+            return d
+
+        # Enrichir avec justificatifs — calculer tous les types de frais
+        totaux_frais = {}
+        toutes_dates = []
+
+        for j in justifs:
+            ttype = j.get("type_document", "autre")
+            info = j.get("informations", {})
+            montant = info.get("montant")
+            date = info.get("date", "")
+
+            if montant is not None:
+                try:
+                    m_float = float(montant)
+                    totaux_frais[ttype] = totaux_frais.get(ttype, 0.0) + m_float
+                except (ValueError, TypeError):
+                    pass
+
+            if date and ttype not in ("rib",):
+                toutes_dates.append(_normaliser_date(date))
+
+        # Injecter dans profil_enrichi
+        if totaux_frais.get("billet_train", 0) > 0:
+            profil_enrichi["frais_train"] = f"{totaux_frais['billet_train']:.2f}"
+        if totaux_frais.get("billet_avion", 0) > 0:
+            profil_enrichi["frais_avion"] = f"{totaux_frais['billet_avion']:.2f}"
+        if totaux_frais.get("taxi", 0) > 0:
+            profil_enrichi["frais_taxi"] = f"{totaux_frais['taxi']:.2f}"
+        if totaux_frais.get("peage", 0) > 0:
+            profil_enrichi["frais_peage"] = f"{totaux_frais['peage']:.2f}"
+
+        # Voiture : depuis le profil (km * 0.5) ou justificatif
+        if profil.get("km_voiture"):
+            try:
+                km = float(profil["km_voiture"])
+                profil_enrichi["frais_voiture"] = f"{km * 0.5:.2f}"
+                profil_enrichi["km_voiture"] = str(int(km))
+            except (ValueError, TypeError):
+                pass
+
+        # Montant total = somme de tous les frais sauf RIB
+        total_global = sum(
+            v for k, v in totaux_frais.items() if k != "rib"
+        )
+        # Ajouter la voiture si présente
+        if profil.get("km_voiture"):
+            try:
+                total_global += float(profil["km_voiture"]) * 0.5
+            except (ValueError, TypeError):
+                pass
+        if total_global > 0:
+            profil_enrichi["montant_total"] = f"{total_global:.2f}"
+
+        # Dates depuis justificatifs
+        if toutes_dates:
+            profil_enrichi["date_depart"] = toutes_dates[0]
+            profil_enrichi["date_arrivee"] = toutes_dates[-1] if len(toutes_dates) > 1 else toutes_dates[0]
+
+        # RIB
         rib = next((j for j in justifs if j.get("type_document") == "rib"), None)
-        if billets_train:
-            total_train = sum(float(j.get("informations", {}).get("montant") or 0) for j in billets_train)
-            dates_train = [j.get("informations", {}).get("date", "") for j in billets_train if j.get("informations", {}).get("date")]
-            profil_enrichi["frais_train"] = f"{total_train:.2f}"
-            profil_enrichi["montant_total"] = f"{total_train:.2f}"
-            if dates_train:
-                profil_enrichi["date_depart"] = dates_train[0]
-                profil_enrichi["date_arrivee"] = dates_train[-1] if len(dates_train) > 1 else dates_train[0]
         if rib:
             info_rib = rib.get("informations", {})
-            profil_enrichi["iban"] = info_rib.get("iban", profil.get("iban", ""))
-            profil_enrichi["bic"] = info_rib.get("bic", profil.get("bic", ""))
-            profil_enrichi["titulaire_compte"] = info_rib.get("titulaire", "")
+            if info_rib.get("iban"):
+                profil_enrichi["iban"] = info_rib["iban"]
+            if info_rib.get("bic"):
+                profil_enrichi["bic"] = info_rib["bic"]
+            if info_rib.get("titulaire"):
+                profil_enrichi["titulaire_compte"] = info_rib["titulaire"]
             profil_enrichi["banque_nom"] = info_rib.get("banque", "La Banque Postale")
 
         ext = os.path.splitext(nom_fich)[1].lower()
