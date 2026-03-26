@@ -597,19 +597,77 @@ def _convert_docx_to_pdf(docx_bytes: bytes, nom_fich: str) -> bytes:
 
 
 def _construire_justif_bloc(justifs: list) -> str:
+    """
+    Construit un bloc texte clair pour les prompts Claude.
+    Inclut les totaux consolidés par catégorie ET le détail de chaque justificatif.
+    """
     if not justifs:
         return ""
-    lines = []
+
+    # Consolider par catégorie
+    totaux = {}
+    dates = []
+    rib_info = {}
+
+    for j in justifs:
+        ttype = j.get("type_document", "autre")
+        info = j.get("informations", {})
+        montant = info.get("montant")
+        date = info.get("date", "")
+
+        if montant is not None:
+            try:
+                m = float(montant)
+                totaux[ttype] = totaux.get(ttype, 0.0) + m
+            except (ValueError, TypeError):
+                pass
+
+        if date:
+            dates.append(date)
+
+        if ttype == "rib":
+            rib_info = info
+
+    # Construire le résumé consolidé
+    lignes_consolidees = []
+    if "billet_train" in totaux:
+        lignes_consolidees.append(f"  → TOTAL TRAIN = {totaux['billet_train']:.2f} EUR")
+    if "billet_avion" in totaux:
+        lignes_consolidees.append(f"  → TOTAL AVION = {totaux['billet_avion']:.2f} EUR")
+    if "taxi" in totaux:
+        lignes_consolidees.append(f"  → TOTAL TAXI = {totaux['taxi']:.2f} EUR")
+    if "peage" in totaux:
+        lignes_consolidees.append(f"  → TOTAL PÉAGE = {totaux['peage']:.2f} EUR")
+
+    total_global = sum(totaux.values())
+    if len(totaux) > 1:
+        lignes_consolidees.append(f"  → MONTANT TOTAL GLOBAL = {total_global:.2f} EUR")
+
+    if dates:
+        lignes_consolidees.append(f"  → DATE DÉPART = {dates[0]}")
+        if len(dates) > 1:
+            lignes_consolidees.append(f"  → DATE ARRIVÉE = {dates[-1]}")
+
+    if rib_info.get("iban"):
+        lignes_consolidees.append(f"  → IBAN = {rib_info['iban']}")
+    if rib_info.get("bic"):
+        lignes_consolidees.append(f"  → BIC = {rib_info['bic']}")
+
+    # Détail de chaque justificatif
+    detail_lines = []
     for j in justifs:
         info = j.get("informations", {})
-        lines.append(
-            f"- {j.get('type_document','')}: {j.get('resume','')} "
-            f"| montant={info.get('montant','')} "
-            f"| date={info.get('date','')} "
-            f"| IBAN={info.get('iban','')} "
-            f"| BIC={info.get('bic','')}"
+        detail_lines.append(
+            f"  - [{j.get('type_document','')}] {j.get('resume','')} "
+            f"montant={info.get('montant','')} date={info.get('date','')} "
+            f"origine={info.get('origine','')} destination={info.get('destination','')}"
         )
-    return "\nJustificatifs fournis :\n" + "\n".join(lines) + "\n"
+
+    bloc = "\nJustificatifs fournis (UTILISE CES DONNÉES POUR REMPLIR LE FORMULAIRE) :\n"
+    if lignes_consolidees:
+        bloc += "Totaux calculés :\n" + "\n".join(lignes_consolidees) + "\n"
+    bloc += "Détail :\n" + "\n".join(detail_lines) + "\n"
+    return bloc
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -1066,45 +1124,115 @@ def ai_analyser_document():
         if not texte:
             return jsonify({"error": "texte_document manquant"}), 400
 
+        # ── Extraire toutes les infos des justificatifs ───────────────────────
         infos_justifs = {}
+
+        # Billets train — additionner tous les montants
         billets_train_analyse = [j for j in justifs if j.get("type_document") == "billet_train"]
         if billets_train_analyse:
-            total_train_analyse = sum(float(j.get("informations", {}).get("montant") or 0) for j in billets_train_analyse)
-            infos_justifs["frais_train"] = f"{total_train_analyse:.2f}"
-            dates = [j.get("informations", {}).get("date") for j in billets_train_analyse if j.get("informations", {}).get("date")]
+            total_train = sum(
+                float(j.get("informations", {}).get("montant") or 0)
+                for j in billets_train_analyse
+            )
+            infos_justifs["frais_train"] = f"{total_train:.2f}"
+            infos_justifs["montant_train"] = f"{total_train:.2f}"
+            dates = [
+                j.get("informations", {}).get("date")
+                for j in billets_train_analyse
+                if j.get("informations", {}).get("date")
+            ]
             if dates:
                 infos_justifs["date_depart"] = dates[0]
+                infos_justifs["date_arrivee"] = dates[-1] if len(dates) > 1 else dates[0]
+
+        # Billets avion
+        billets_avion = [j for j in justifs if j.get("type_document") == "billet_avion"]
+        if billets_avion:
+            total_avion = sum(float(j.get("informations", {}).get("montant") or 0) for j in billets_avion)
+            infos_justifs["frais_avion"] = f"{total_avion:.2f}"
+            infos_justifs["montant_avion"] = f"{total_avion:.2f}"
+
+        # Taxi
+        taxis = [j for j in justifs if j.get("type_document") == "taxi"]
+        if taxis:
+            total_taxi = sum(float(j.get("informations", {}).get("montant") or 0) for j in taxis)
+            infos_justifs["frais_taxi"] = f"{total_taxi:.2f}"
+            infos_justifs["montant_taxi"] = f"{total_taxi:.2f}"
+
+        # Péage
+        peages = [j for j in justifs if j.get("type_document") == "peage"]
+        if peages:
+            total_peage = sum(float(j.get("informations", {}).get("montant") or 0) for j in peages)
+            infos_justifs["frais_peage"] = f"{total_peage:.2f}"
+            infos_justifs["montant_peage"] = f"{total_peage:.2f}"
+
+        # Total global de tous les justificatifs
+        total_global = sum(
+            float(j.get("informations", {}).get("montant") or 0)
+            for j in justifs
+            if j.get("type_document") not in ("rib",)
+        )
+        if total_global > 0:
+            infos_justifs["montant_total"] = f"{total_global:.2f}"
+
+        # RIB
         for j in justifs:
             info = j.get("informations", {})
-            type_doc = j.get("type_document", "")
-            if type_doc == "rib":
+            if j.get("type_document") == "rib":
                 if info.get("iban"):
-                    infos_justifs["iban"] = info.get("iban")
+                    infos_justifs["iban"] = info["iban"]
                 if info.get("bic"):
-                    infos_justifs["bic"] = info.get("bic")
+                    infos_justifs["bic"] = info["bic"]
                 if info.get("titulaire"):
-                    infos_justifs["titulaire_compte"] = info.get("titulaire")
+                    infos_justifs["titulaire_compte"] = info["titulaire"]
                 infos_justifs["banque_nom"] = info.get("banque", "La Banque Postale")
 
+        # Fusionner profil + justificatifs — les justificatifs complètent le profil
         profil_complet = {**profil, **infos_justifs}
-        champs_profil_renseignes = {k: v for k, v in profil_complet.items() if v and str(v).strip() not in ("", "null", "None")}
+        champs_renseignes = {
+            k: v for k, v in profil_complet.items()
+            if v and str(v).strip() not in ("", "null", "None", "0", "0.00")
+        }
+
+        # Champs couverts par les justificatifs (ne pas redemander à l'utilisateur)
+        CHAMPS_COUVERTS_PAR_JUSTIFS = set()
+        if billets_train_analyse:
+            CHAMPS_COUVERTS_PAR_JUSTIFS.update([
+                "frais_train", "montant_train", "date_depart", "date_arrivee",
+                "montant_total", "date_voyage"
+            ])
+        if billets_avion:
+            CHAMPS_COUVERTS_PAR_JUSTIFS.update(["frais_avion", "montant_avion"])
+        if taxis:
+            CHAMPS_COUVERTS_PAR_JUSTIFS.update(["frais_taxi", "montant_taxi"])
+        if peages:
+            CHAMPS_COUVERTS_PAR_JUSTIFS.update(["frais_peage", "montant_peage"])
+        if any(j.get("type_document") == "rib" for j in justifs):
+            CHAMPS_COUVERTS_PAR_JUSTIFS.update(["iban", "bic", "titulaire_compte"])
 
         system = (
             "Tu es un assistant administratif expert. "
             "Tu analyses des documents administratifs français et identifies "
-            "les champs personnels qui doivent être remplis. "
+            "les champs personnels qui doivent être remplis par l'utilisateur. "
             "Tu retournes UNIQUEMENT un objet JSON valide, "
             "sans texte avant ni après, sans balises markdown."
+        )
+
+        champs_couverts_str = (
+            f"\nChamps déjà couverts par les justificatifs (NE PAS inclure dans champs_manquants) : "
+            f"{', '.join(sorted(CHAMPS_COUVERTS_PAR_JUSTIFS))}"
+            if CHAMPS_COUVERTS_PAR_JUSTIFS else ""
         )
 
         user = f"""Voici le texte d'un document administratif à remplir :
 
 {texte[:4000]}
 
-Informations déjà disponibles dans le profil :
-{json.dumps(champs_profil_renseignes, ensure_ascii=False, indent=2)}
+Informations déjà disponibles (profil + justificatifs) :
+{json.dumps(champs_renseignes, ensure_ascii=False, indent=2)}
+{champs_couverts_str}
 
-Identifie tous les champs personnels présents dans ce document.
+Identifie UNIQUEMENT les champs personnels présents dans ce document qui manquent encore.
 Retourne ce JSON :
 {{
   "champs_manquants": [
@@ -1116,13 +1244,17 @@ Retourne ce JSON :
       "options": ["opt1", "opt2"]
     }}
   ],
-  "champs_trouves": ["liste des champs déjà disponibles dans le profil"]
+  "champs_trouves": ["liste des champs déjà disponibles"]
 }}
 
-Pour "situation_famille" → type "choix", options : ["Célibataire", "Marié(e)", "Pacsé(e)", "Divorcé(e)", "Veuf/Veuve", "Concubinage"]
-Pour "situation_pro" → type "choix", options : ["Secteur public", "Secteur privé salarié", "Travailleur non-salarié / Auto-entrepreneur", "Intermittent du spectacle", "Étudiant(e) 3ème cycle", "Retraité(e)"]
-
-Ne liste dans champs_manquants QUE les champs présents dans le document ET absents du profil.
+RÈGLES :
+- Ne liste dans champs_manquants QUE les champs présents dans le document ET absents du profil
+- Ne jamais demander les montants de transport si des justificatifs sont fournis
+- Ne jamais demander les dates de voyage si des billets sont fournis
+- Ne jamais demander l'IBAN/BIC si un RIB est fourni
+- Pour "situation_famille" → type "choix", options : ["Célibataire", "Marié(e)", "Pacsé(e)", "Divorcé(e)", "Veuf/Veuve", "Concubinage"]
+- Pour "situation_pro" → type "choix", options : ["Secteur public", "Secteur privé salarié", "Travailleur non-salarié / Auto-entrepreneur", "Intermittent du spectacle", "Étudiant(e) 3ème cycle", "Retraité(e)"]
+- Pour "civilite" → type "choix", options : ["Pr", "Dr", "M.", "Mme", "Mlle"]
 
 JSON :"""
 
@@ -1139,7 +1271,7 @@ JSON :"""
         if "champs_manquants" not in result:
             result["champs_manquants"] = []
         if "champs_trouves" not in result:
-            result["champs_trouves"] = list(champs_profil_renseignes.keys())
+            result["champs_trouves"] = list(champs_renseignes.keys())
         return jsonify(result)
 
     except json.JSONDecodeError:
