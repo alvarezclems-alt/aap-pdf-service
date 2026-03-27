@@ -804,7 +804,8 @@ def _remplir_pdf_direct(pdf_bytes, nom_fich, profil_enrichi, justifs):
         insts_civ = page.search_for(marqueur_civ)
         for inst in insts_civ:
             page.draw_rect(inst, color=(1,1,1), fill=(1,1,1))
-            _inserer_valeur_pdf(page, inst.x0, inst.y1 - 1, "☑", fontsize=8)
+            label = marqueur_civ.replace("q ", "[X] ")
+            _inserer_valeur_pdf(page, inst.x0, inst.y1 - 1, label, fontsize=8)
             break
 
     # Tableau VOYAGE — ellipses à x≈349, y variable
@@ -838,14 +839,15 @@ def _remplir_pdf_direct(pdf_bytes, nom_fich, profil_enrichi, justifs):
         (687, "montant_total"),
     ]
 
+    MARQUEUR_MONTANT = "…………………………………… Euros"
+
     for y_ligne, cle_profil in LIGNES_MONTANTS:
         valeur = p.get(cle_profil, "") if cle_profil else ""
         if not valeur:
             continue
-        # Trouver l'ellipse sur cette ligne
-        insts = page.search_for("………")
+        insts = page.search_for(MARQUEUR_MONTANT)
         for inst in insts:
-            if abs(inst.y0 - y_ligne) < 8 and inst.x0 > 300:
+            if abs(inst.y0 - y_ligne) < 8:
                 page.draw_rect(inst, color=(1,1,1), fill=(1,1,1))
                 _inserer_valeur_pdf(page, inst.x0 + 1, inst.y1 - 1, valeur)
                 break
