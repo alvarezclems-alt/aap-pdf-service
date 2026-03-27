@@ -74,12 +74,24 @@ except ImportError as e:
 def claude_text(system, user, max_tokens=800):
     if not CLAUDE_OK:
         return "Service IA non disponible"
-    msg = claude.messages.create(
-        model=CLAUDE_MODEL, max_tokens=max_tokens,
-        system=system,
-        messages=[{"role": "user", "content": user}]
-    )
-    return msg.content[0].text.strip()
+    import time
+    last_error = None
+    for tentative in range(3):
+        try:
+            msg = claude.messages.create(
+                model=CLAUDE_MODEL, max_tokens=max_tokens,
+                system=system,
+                messages=[{"role": "user", "content": user}]
+            )
+            return msg.content[0].text.strip()
+        except Exception as e:
+            last_error = e
+            if "529" in str(e) or "overloaded" in str(e).lower():
+                print(f"[CLAUDE] API surchargée, tentative {tentative+1}/3, attente {2**tentative}s")
+                time.sleep(2 ** tentative)
+            else:
+                raise
+    raise last_error
 
 
 # ── Health ─────────────────────────────────────────────────────────────────────
@@ -508,10 +520,24 @@ Retourne ce JSON (ne mets que les champs que tu trouves) :
 
         content.append({"type": "text", "text": user})
 
-        response = claude.messages.create(
-            model=CLAUDE_MODEL, max_tokens=1000, system=system,
-            messages=[{"role": "user", "content": content}]
-        )
+        import time
+        last_error = None
+        for tentative in range(3):  # 3 tentatives max
+            try:
+                response = claude.messages.create(
+                    model=CLAUDE_MODEL, max_tokens=1000, system=system,
+                    messages=[{"role": "user", "content": content}]
+                )
+                break  # Succès → sortir de la boucle
+            except Exception as e:
+                last_error = e
+                if "529" in str(e) or "overloaded" in str(e).lower():
+                    print(f"[JUSTIF] API surchargée, tentative {tentative+1}/3, attente {2**tentative}s")
+                    time.sleep(2 ** tentative)  # 1s, 2s, 4s
+                else:
+                    raise  # Autre erreur → remonter immédiatement
+        else:
+            raise last_error  # 3 échecs → erreur
 
         raw = response.content[0].text.strip()
         if raw.startswith("```"):
