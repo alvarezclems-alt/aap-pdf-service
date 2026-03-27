@@ -1158,7 +1158,16 @@ def ai_remplir_document():
 
         ext = os.path.splitext(nom_fich)[1].lower()
 
-        # ── BRANCHE PDF ───────────────────────────────────────────────────────
+        # ── LOG DIAGNOSTIC ────────────────────────────────────────────────────
+        print(f"DEBUG profil_enrichi keys: {list(profil_enrichi.keys())}")
+        print(f"DEBUG frais_train: {profil_enrichi.get('frais_train')}")
+        print(f"DEBUG montant_total: {profil_enrichi.get('montant_total')}")
+        print(f"DEBUG date_depart: {profil_enrichi.get('date_depart')}")
+        print(f"DEBUG nb justifs reçus: {len(justifs)}")
+        print(f"DEBUG justifs types: {[j.get('type_document') for j in justifs]}")
+        print(f"DEBUG justifs montants: {[j.get('informations',{}).get('montant') for j in justifs]}")
+        print(f"DEBUG totaux_frais: {totaux_frais}")
+        # ─────────────────────────────────────────────────────────────────────
         if ext == ".pdf":
             if FITZ_OK:
                 # Flux direct PyMuPDF — pas de conversion DOCX
