@@ -826,13 +826,22 @@ def _detecter_zones_pdf(pdf_bytes):
                 # Trouver le label le plus proche à gauche ou au-dessus
                 label = _trouver_label_proche(words, inst, page)
 
+                # Cas spécial (jj/mm/aa) : la zone vide est dans la colonne droite
+                # Le marqueur est dans la col gauche, on insère à droite (x≈340)
+                if "(jj/mm/aa)" in marqueur or "(jj/mm/aaaa)" in marqueur:
+                    x_insert = max(inst.x1 + 180, inst.x0 + 220)
+                    y_insert = inst.y1 - 1
+                else:
+                    x_insert = inst.x0 + 1
+                    y_insert = inst.y1 - 1
+
                 zones.append({
                     "page": page_num,
                     "marqueur": marqueur,
                     "rect": [inst.x0, inst.y0, inst.x1, inst.y1],
                     "label": label,
-                    "x_insert": inst.x0 + 1,
-                    "y_insert": inst.y1 - 1,
+                    "x_insert": x_insert,
+                    "y_insert": y_insert,
                 })
 
     doc.close()
@@ -842,33 +851,34 @@ def _detecter_zones_pdf(pdf_bytes):
 def _trouver_label_proche(words, rect, page):
     """
     Trouve le label textuel le plus proche à gauche ou au-dessus d'une zone.
-    Exclut les marqueurs de zones vides.
+    Cherche sur toute la largeur de la ligne pour les tableaux.
     """
     MOTS_EXCLUS = {
         "euros", "eur", "€", "x", "0,5", "km", ":",
         "………", "......", "____", "(jj/mm/aa)", "(jj/mm/aaaa)"
     }
 
-    # Chercher les mots sur la même ligne (±8px) à gauche
+    # Chercher les mots sur la même ligne (±8px) à gauche — toute la largeur
     candidats_gauche = []
     for w in words:
         wx0, wy0, wx1, wy1, word = w[0], w[1], w[2], w[3], w[4]
         mot = word.strip().lower().rstrip(":").strip()
         if mot in MOTS_EXCLUS or len(mot) < 2:
             continue
+        # Même ligne ±8px ET à gauche de la zone (sans limite de distance)
         if abs(wy0 - rect.y0) < 10 and wx1 <= rect.x0 + 5:
             dist = rect.x0 - wx1
             candidats_gauche.append((dist, word.strip()))
 
     if candidats_gauche:
-        # Prendre le mot le plus proche à gauche
         candidats_gauche.sort(key=lambda x: x[0])
-        # Reconstruire le label depuis les mots proches
+        # Prendre les mots les plus proches (jusqu'à 4 mots, distance < 300px)
         mots_label = []
         for dist, mot in candidats_gauche[:4]:
-            if dist < 150:
+            if dist < 300:
                 mots_label.insert(0, mot)
-        return " ".join(mots_label).strip().rstrip(":")
+        if mots_label:
+            return " ".join(mots_label).strip().rstrip(":")
 
     # Sinon chercher au-dessus (±30px)
     candidats_dessus = []
@@ -907,10 +917,30 @@ def _remplir_pdf_direct(pdf_bytes, nom_fich, profil_enrichi, justifs):
         print("[REMPLIR_PDF] Aucune zone détectée, retour PDF original")
         return pdf_bytes
 
-    # ── 2. Construire la représentation pour Claude ───────────────────────────
+    # Enrichir les labels vides des zones Euros en cherchant le label dans toute la ligne
+    doc_tmp = fitz.open(stream=pdf_bytes, filetype="pdf")
+    for z in zones:
+        if not z["label"] and "Euros" in z["marqueur"]:
+            page_tmp = doc_tmp[z["page"]]
+            words_tmp = page_tmp.get_text("words")
+            # Chercher n'importe quel mot sur la même ligne à gauche (toute la largeur)
+            candidats = []
+            for w in words_tmp:
+                wx0,wy0,wx1,wy1,word = w[0],w[1],w[2],w[3],w[4]
+                mot = word.strip().lower()
+                if len(mot) < 2 or mot in {"euros","eur","€","x","0,5","km"}:
+                    continue
+                if abs(wy0 - z["rect"][1]) < 10 and wx1 <= z["rect"][0] + 5:
+                    candidats.append((z["rect"][0] - wx1, word.strip()))
+            if candidats:
+                candidats.sort(key=lambda x: x[0])
+                z["label"] = " ".join(m for _,m in candidats[:3] if _[0] < 300 if True).strip()
+    doc_tmp.close()
+
+    # Construire la représentation pour Claude
     zones_str = "\n".join(
-        f"[{i}] label='{z['label']}' marqueur='{z['marqueur'][:20]}' "
-        f"x={z['x_insert']:.0f} y={z['y_insert']:.0f} page={z['page']}"
+        f"[{i}] label='{z['label']}' marqueur='{z['marqueur'][:25]}' "
+        f"x_insert={z['x_insert']:.0f} y={z['rect'][1]:.0f} page={z['page']}"
         for i, z in enumerate(zones)
     )
 
