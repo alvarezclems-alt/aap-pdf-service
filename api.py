@@ -1048,42 +1048,43 @@ JSON :"""
 
     print(f"[REMPLIR_PDF] {len(zones)} zones détectées, {len(remplissages)} remplissages")
 
-    # ── 3. Forcer le mapping Nom/Prénom côté Python (pas Claude) ─────────────
-    # Stratégie 1 : par label
-    zones_nom_prenom = [
-        (i, z) for i, z in enumerate(zones)
-        if any(mot in z["label"].lower() for mot in ["nom", "prénom", "prenom"])
-    ]
-    # Stratégie 2 : si pas trouvé par label, prendre les 2 zones sur la même ligne Y
-    # qui ont des marqueurs de pointillés (pas Euros, pas jj/mm/aa)
-    if len(zones_nom_prenom) < 2:
-        # Chercher zones avec marqueur "......" sur la même ligne Y
-        zones_points = [
-            (i, z) for i, z in enumerate(zones)
-            if "……" not in z["marqueur"] and "jj/mm" not in z["marqueur"]
-            and "Euros" not in z["marqueur"]
-        ]
-        # Grouper par Y (même ligne ±5px)
-        from itertools import groupby
-        zones_points_sorted = sorted(zones_points, key=lambda x: round(x[1]["y"] / 10) * 10)
-        for y_key, group in groupby(zones_points_sorted, key=lambda x: round(x[1]["y"] / 10) * 10):
-            grp = list(group)
-            if len(grp) >= 2:
-                # Première ligne avec 2 zones = ligne Nom/Prénom
-                grp.sort(key=lambda x: x[1]["x_insert"])
-                zones_nom_prenom = grp[:2]
-                break
+    # ── 3. Forcer Nom/Prénom directement dans le PDF (bypass Claude total) ────
+    # Trouver toutes les zones de pointillés sur la même ligne
+    # Trier par X → gauche=Nom, droite=Prénom
+    doc_pre = fitz.open(stream=pdf_bytes, filetype="pdf")
+    page_pre = doc_pre[0]
 
-    if zones_nom_prenom:
-        zones_nom_prenom.sort(key=lambda x: x[1]["x_insert"])
-        if len(zones_nom_prenom) >= 1:
-            idx_nom = str(zones_nom_prenom[0][0])
-            remplissages[idx_nom] = p.get("nom", "")
-            print(f"[NOM] index={idx_nom} x={zones_nom_prenom[0][1]['x_insert']:.0f} → '{p.get('nom','')}'")
-        if len(zones_nom_prenom) >= 2:
-            idx_prenom = str(zones_nom_prenom[1][0])
-            remplissages[idx_prenom] = p.get("prenom", "")
-            print(f"[PRENOM] index={idx_prenom} x={zones_nom_prenom[1][1]['x_insert']:.0f} → '{p.get('prenom','')}'")
+    MARQUEURS_CHAMPS = ["......................................................................",
+                        "...................................................................",
+                        "................................................................",
+                        "......"]
+
+    zones_par_ligne = {}  # y_arrondi → liste d'instances
+    for mq in MARQUEURS_CHAMPS:
+        for inst in page_pre.search_for(mq):
+            y_key = round(inst.y0 / 5) * 5
+            if y_key not in zones_par_ligne:
+                zones_par_ligne[y_key] = []
+            # éviter doublons X
+            if not any(abs(i.x0 - inst.x0) < 20 for i in zones_par_ligne[y_key]):
+                zones_par_ligne[y_key].append(inst)
+
+    doc_pre.close()
+
+    # Trouver la première ligne avec 2+ zones → ligne Nom/Prénom
+    for y_key in sorted(zones_par_ligne.keys()):
+        insts = sorted(zones_par_ligne[y_key], key=lambda i: i.x0)
+        if len(insts) >= 2:
+            # C'est la ligne Nom/Prénom
+            # Marquer ces zones dans remplissages via index correspondant
+            for z_idx, z in enumerate(zones):
+                if abs(z["y"] - y_key) < 8 and abs(z["x_insert"] - (insts[0].x0 + 1)) < 50:
+                    remplissages[str(z_idx)] = p.get("nom", "")
+                    print(f"[NOM FORCÉ] index={z_idx} x={z['x_insert']:.0f} → '{p.get('nom','')}'")
+                if abs(z["y"] - y_key) < 8 and abs(z["x_insert"] - (insts[1].x0 + 1)) < 50:
+                    remplissages[str(z_idx)] = p.get("prenom", "")
+                    print(f"[PRÉNOM FORCÉ] index={z_idx} x={z['x_insert']:.0f} → '{p.get('prenom','')}'")
+            break
 
     # ── 4. Gérer la civilité séparément (cases à cocher) ─────────────────────
     civilite_valeur = p.get("civilite", "")
