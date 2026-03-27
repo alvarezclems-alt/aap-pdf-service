@@ -1048,7 +1048,23 @@ JSON :"""
 
     print(f"[REMPLIR_PDF] {len(zones)} zones détectées, {len(remplissages)} remplissages")
 
-    # ── 3. Gérer la civilité séparément (cases à cocher) ─────────────────────
+    # ── 3. Forcer le mapping Nom/Prénom côté Python (pas Claude) ─────────────
+    # Identifier les zones nom/prénom par label ET position X
+    # Sur la même ligne Y, la zone la plus à gauche = Nom, celle à droite = Prénom
+    zones_nom_prenom = [
+        (i, z) for i, z in enumerate(zones)
+        if "nom" in z["label"].lower() or "prénom" in z["label"].lower() or "prenom" in z["label"].lower()
+    ]
+    if zones_nom_prenom:
+        zones_nom_prenom.sort(key=lambda x: x[1]["x_insert"])
+        if len(zones_nom_prenom) >= 1:
+            idx_nom = str(zones_nom_prenom[0][0])
+            remplissages[idx_nom] = p.get("nom", "")
+        if len(zones_nom_prenom) >= 2:
+            idx_prenom = str(zones_nom_prenom[1][0])
+            remplissages[idx_prenom] = p.get("prenom", "")
+
+    # ── 4. Gérer la civilité séparément (cases à cocher) ─────────────────────
     civilite_valeur = p.get("civilite", "")
 
     # ── 4. Appliquer les insertions avec PyMuPDF ──────────────────────────────
