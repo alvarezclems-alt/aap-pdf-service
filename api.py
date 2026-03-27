@@ -1049,41 +1049,14 @@ JSON :"""
 
     print(f"[REMPLIR_PDF] {len(zones)} zones détectées, {len(remplissages)} remplissages")
 
-    # ── 3. Forcer Nom/Prénom directement dans le PDF (bypass Claude total) ────
-    # Trouver toutes les zones de pointillés sur la même ligne
-    # Trier par X → gauche=Nom, droite=Prénom
-    doc_pre = fitz.open(stream=pdf_bytes, filetype="pdf")
-    page_pre = doc_pre[0]
-
-    MARQUEURS_CHAMPS = ["......................................................................",
-                        "...................................................................",
-                        "................................................................",
-                        "......"]
-
-    zones_par_ligne = {}  # y_arrondi → liste d'instances
-    for mq in MARQUEURS_CHAMPS:
-        for inst in page_pre.search_for(mq):
-            y_key = round(inst.y0 / 5) * 5
-            if y_key not in zones_par_ligne:
-                zones_par_ligne[y_key] = []
-            # éviter doublons X
-            if not any(abs(i.x0 - inst.x0) < 20 for i in zones_par_ligne[y_key]):
-                zones_par_ligne[y_key].append(inst)
-
-    doc_pre.close()
-
-    # Trouver la première ligne avec 2+ zones → ligne Nom/Prénom
-    for y_ligne in sorted(zones_par_ligne.keys()):
-        insts = sorted(zones_par_ligne[y_ligne], key=lambda i: i.x0)
-        if len(insts) >= 2:
-            for z_idx, z in enumerate(zones):
-                if abs(z["y"] - y_ligne) < 8 and abs(z["x_insert"] - (insts[0].x0 + 1)) < 50:
-                    remplissages[str(z_idx)] = p.get("nom", "")
-                    print(f"[NOM FORCÉ] index={z_idx} → '{p.get('nom','')}'")
-                elif abs(z["y"] - y_ligne) < 8 and abs(z["x_insert"] - (insts[1].x0 + 1)) < 50:
-                    remplissages[str(z_idx)] = p.get("prenom", "")
-                    print(f"[PRÉNOM FORCÉ] index={z_idx} → '{p.get('prenom','')}'")
-            break
+    # ── 3. Forcer Nom/Prénom directement dans le PDF ─────────────────────────
+    # On enlève les index nom/prénom des remplissages Claude pour éviter tout conflit
+    zones_nom_idx = [
+        str(i) for i, z in enumerate(zones)
+        if any(mot in z["label"].lower() for mot in ["nom", "prénom", "prenom"])
+    ]
+    for idx in zones_nom_idx:
+        remplissages.pop(idx, None)
 
     # ── 4. Gérer la civilité séparément (cases à cocher) ─────────────────────
     civilite_valeur = p.get("civilite", "")
@@ -1125,7 +1098,46 @@ JSON :"""
         except Exception as e:
             print(f"[REMPLIR_PDF] Erreur zone {idx_str}: {e}")
 
-    # ── 5. Gérer les cases à cocher civilité ─────────────────────────────────
+    # ── 5. Insérer Nom/Prénom directement par recherche de marqueurs ─────────
+    # Trouver la première ligne avec 2 zones de pointillés = ligne Nom/Prénom
+    # Insertion directe sans passer par le système de zones/remplissages
+    nom_val = p.get("nom", "")
+    prenom_val = p.get("prenom", "")
+    if nom_val or prenom_val:
+        page0 = doc[0]
+        MQUEURS_POINTS = [
+            "......................................................................",
+            "...................................................................",
+            "......",
+        ]
+        lignes_pts = {}
+        for mq in MQUEURS_POINTS:
+            for inst in page0.search_for(mq):
+                yk = round(inst.y0 / 5) * 5
+                if yk not in lignes_pts:
+                    lignes_pts[yk] = []
+                if not any(abs(ex.x0 - inst.x0) < 20 for ex in lignes_pts[yk]):
+                    lignes_pts[yk].append(inst)
+
+        for yk in sorted(lignes_pts.keys()):
+            pts = sorted(lignes_pts[yk], key=lambda i: i.x0)
+            if len(pts) >= 2:
+                # Effacer et insérer Nom (gauche)
+                page0.draw_rect(pts[0], color=(1,1,1), fill=(1,1,1))
+                page0.insert_text(
+                    (pts[0].x0 + 1, pts[0].y1 - 1),
+                    nom_val, fontsize=9, color=(0,0,0), fontname="helv"
+                )
+                # Effacer et insérer Prénom (droite)
+                page0.draw_rect(pts[1], color=(1,1,1), fill=(1,1,1))
+                page0.insert_text(
+                    (pts[1].x0 + 1, pts[1].y1 - 1),
+                    prenom_val, fontsize=9, color=(0,0,0), fontname="helv"
+                )
+                print(f"[NOM/PRÉNOM] '{nom_val}' / '{prenom_val}' insérés à y≈{yk}")
+                break
+
+    # ── 7. Gérer les cases à cocher civilité ─────────────────────────────────
     if civilite_valeur:
         for page_num in range(len(doc)):
             page = doc[page_num]
@@ -1148,7 +1160,7 @@ JSON :"""
                     )
                     break
 
-    # ── 6. Date du jour automatique ───────────────────────────────────────────
+    # ── 8. Date du jour automatique ───────────────────────────────────────────
     from datetime import date as _date
     date_aujourd_hui = _date.today().strftime("%d/%m/%Y")
     for page_num in range(len(doc)):
@@ -1162,7 +1174,7 @@ JSON :"""
             )
             break
 
-    # ── 7. Sauvegarder ───────────────────────────────────────────────────────
+    # ── 9. Sauvegarder ───────────────────────────────────────────────────────
     output = io.BytesIO()
     doc.save(output)
     doc.close()
