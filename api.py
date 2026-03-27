@@ -1037,11 +1037,6 @@ JSON :"""
 
 @app.route("/ai/remplir-document", methods=["POST"])
 def ai_remplir_document():
-    """
-    Reçoit un PDF, DOC ou DOCX en base64 + le profil utilisateur.
-    Pour les PDF : utilise PyMuPDF pour insérer directement aux bonnes coordonnées.
-    Pour les DOCX : séparation stricte label/valeur, Claude retourne uniquement les valeurs.
-    """
     if not CLAUDE_OK:
         return jsonify({"error": "Service Claude non disponible"}), 503
     if not DOCX_OK:
@@ -1052,6 +1047,11 @@ def ai_remplir_document():
         b64      = data.get("fichier_base64", "")
         nom_fich = data.get("nom_fichier", "document.docx")
         justifs  = data.get("justificatifs", [])
+
+        print(f"[REMPLIR] START nom={nom_fich} b64_len={len(b64)} nb_justifs={len(justifs)} fitz={FITZ_OK}")
+        print(f"[REMPLIR] justifs_types={[j.get('type_document') for j in justifs]}")
+        print(f"[REMPLIR] justifs_montants={[j.get('informations',{}).get('montant') for j in justifs]}")
+        print(f"[REMPLIR] profil_keys={list(profil.keys())}")
 
         if not b64:
             return jsonify({"error": "fichier_base64 manquant"}), 400
@@ -1077,14 +1077,12 @@ def ai_remplir_document():
             profil_enrichi["nom"] = parts[1] if len(parts) > 1 else ""
 
         def _normaliser_date(d: str) -> str:
-            """Convertit JJ/MM/AAAA ou JJ/MM/YYYY vers jj/mm/aa."""
+            """Convertit JJ/MM/AAAA vers jj/mm/aa."""
             if not d:
                 return d
-            # Si format JJ/MM/AAAA → jj/mm/aa
-            import re as _re
-            m = _re.match(r'(\d{1,2})/(\d{2})/(\d{4})', d)
-            if m:
-                return f"{m.group(1).zfill(2)}/{m.group(2)}/{m.group(3)[2:]}"
+            match = re.match(r'(\d{1,2})/(\d{2})/(\d{4})', d)
+            if match:
+                return f"{match.group(1).zfill(2)}/{match.group(2)}/{match.group(3)[2:]}"
             return d
 
         # Enrichir avec justificatifs — calculer tous les types de frais
