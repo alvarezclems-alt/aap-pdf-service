@@ -983,11 +983,9 @@ RÈGLES ABSOLUES :
 2. "valeur" = UNIQUEMENT la donnée à insérer
 
 MAPPING NOM/PRÉNOM — BASÉ SUR POSITION X :
-- Si label contient "prénom" OU x_insert > 300 ET sur la même ligne qu'un champ "nom" → profil["prenom"]
-- Si label contient "nom" (sans "prénom") OU x_insert < 300 → profil["nom"] = NOM DE FAMILLE
+- Si label contient "prénom" OU x_insert > 300 ET sur la même ligne qu'un champ "nom" → valeur = "{p.get('prenom','')}"
+- Si label contient "nom" (sans "prénom") OU x_insert < 300 → valeur = "{p.get('nom','')}"
 - Règle absolue : NOM DE FAMILLE ≠ PRÉNOM, toujours les séparer
-- profil["nom"] = "{profil.get('nom','')}" → champ Nom
-- profil["prenom"] = "{profil.get('prenom','')}" → champ Prénom
 
 MAPPING TABLEAU VOYAGE (labels "Train", "Avion", "Taxi", etc.) :
 - label "Train" ou contient "train" → profil["frais_train"] + " Euros"
