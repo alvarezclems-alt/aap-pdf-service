@@ -842,6 +842,7 @@ def _detecter_zones_pdf(pdf_bytes):
                     "label": label,
                     "x_insert": x_insert,
                     "y_insert": y_insert,
+                    "y": inst.y0,  # raccourci pour comparaisons
                 })
 
     doc.close()
