@@ -1072,18 +1072,16 @@ JSON :"""
     doc_pre.close()
 
     # Trouver la première ligne avec 2+ zones → ligne Nom/Prénom
-    for y_key in sorted(zones_par_ligne.keys()):
-        insts = sorted(zones_par_ligne[y_key], key=lambda i: i.x0)
+    for y_ligne in sorted(zones_par_ligne.keys()):
+        insts = sorted(zones_par_ligne[y_ligne], key=lambda i: i.x0)
         if len(insts) >= 2:
-            # C'est la ligne Nom/Prénom
-            # Marquer ces zones dans remplissages via index correspondant
             for z_idx, z in enumerate(zones):
-                if abs(z["y"] - y_key) < 8 and abs(z["x_insert"] - (insts[0].x0 + 1)) < 50:
+                if abs(z["y"] - y_ligne) < 8 and abs(z["x_insert"] - (insts[0].x0 + 1)) < 50:
                     remplissages[str(z_idx)] = p.get("nom", "")
-                    print(f"[NOM FORCÉ] index={z_idx} x={z['x_insert']:.0f} → '{p.get('nom','')}'")
-                if abs(z["y"] - y_key) < 8 and abs(z["x_insert"] - (insts[1].x0 + 1)) < 50:
+                    print(f"[NOM FORCÉ] index={z_idx} → '{p.get('nom','')}'")
+                elif abs(z["y"] - y_ligne) < 8 and abs(z["x_insert"] - (insts[1].x0 + 1)) < 50:
                     remplissages[str(z_idx)] = p.get("prenom", "")
-                    print(f"[PRÉNOM FORCÉ] index={z_idx} x={z['x_insert']:.0f} → '{p.get('prenom','')}'")
+                    print(f"[PRÉNOM FORCÉ] index={z_idx} → '{p.get('prenom','')}'")
             break
 
     # ── 4. Gérer la civilité séparément (cases à cocher) ─────────────────────
