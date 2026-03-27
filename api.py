@@ -1049,20 +1049,41 @@ JSON :"""
     print(f"[REMPLIR_PDF] {len(zones)} zones détectées, {len(remplissages)} remplissages")
 
     # ── 3. Forcer le mapping Nom/Prénom côté Python (pas Claude) ─────────────
-    # Identifier les zones nom/prénom par label ET position X
-    # Sur la même ligne Y, la zone la plus à gauche = Nom, celle à droite = Prénom
+    # Stratégie 1 : par label
     zones_nom_prenom = [
         (i, z) for i, z in enumerate(zones)
-        if "nom" in z["label"].lower() or "prénom" in z["label"].lower() or "prenom" in z["label"].lower()
+        if any(mot in z["label"].lower() for mot in ["nom", "prénom", "prenom"])
     ]
+    # Stratégie 2 : si pas trouvé par label, prendre les 2 zones sur la même ligne Y
+    # qui ont des marqueurs de pointillés (pas Euros, pas jj/mm/aa)
+    if len(zones_nom_prenom) < 2:
+        # Chercher zones avec marqueur "......" sur la même ligne Y
+        zones_points = [
+            (i, z) for i, z in enumerate(zones)
+            if "……" not in z["marqueur"] and "jj/mm" not in z["marqueur"]
+            and "Euros" not in z["marqueur"]
+        ]
+        # Grouper par Y (même ligne ±5px)
+        from itertools import groupby
+        zones_points_sorted = sorted(zones_points, key=lambda x: round(x[1]["y"] / 10) * 10)
+        for y_key, group in groupby(zones_points_sorted, key=lambda x: round(x[1]["y"] / 10) * 10):
+            grp = list(group)
+            if len(grp) >= 2:
+                # Première ligne avec 2 zones = ligne Nom/Prénom
+                grp.sort(key=lambda x: x[1]["x_insert"])
+                zones_nom_prenom = grp[:2]
+                break
+
     if zones_nom_prenom:
         zones_nom_prenom.sort(key=lambda x: x[1]["x_insert"])
         if len(zones_nom_prenom) >= 1:
             idx_nom = str(zones_nom_prenom[0][0])
             remplissages[idx_nom] = p.get("nom", "")
+            print(f"[NOM] index={idx_nom} x={zones_nom_prenom[0][1]['x_insert']:.0f} → '{p.get('nom','')}'")
         if len(zones_nom_prenom) >= 2:
             idx_prenom = str(zones_nom_prenom[1][0])
             remplissages[idx_prenom] = p.get("prenom", "")
+            print(f"[PRENOM] index={idx_prenom} x={zones_nom_prenom[1][1]['x_insert']:.0f} → '{p.get('prenom','')}'")
 
     # ── 4. Gérer la civilité séparément (cases à cocher) ─────────────────────
     civilite_valeur = p.get("civilite", "")
