@@ -813,15 +813,15 @@ def _detecter_zones_pdf(pdf_bytes):
         words = page.get_text("words")  # (x0, y0, x1, y1, word, block, line, word_idx)
 
         # Chercher chaque marqueur
-        zones_trouvees_y = set()  # éviter doublons sur même ligne
+        zones_trouvees_yx = set()  # éviter doublons : même ligne ET même position X
 
         for marqueur in MARQUEURS_VIDES:
             instances = page.search_for(marqueur)
             for inst in instances:
-                y_key = round(inst.y0)
-                if y_key in zones_trouvees_y:
+                yx_key = (round(inst.y0), round(inst.x0 / 50) * 50)  # grouper par tranches de 50px en X
+                if yx_key in zones_trouvees_yx:
                     continue
-                zones_trouvees_y.add(y_key)
+                zones_trouvees_yx.add(yx_key)
 
                 # Trouver le label le plus proche à gauche ou au-dessus
                 label = _trouver_label_proche(words, inst, page)
