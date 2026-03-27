@@ -875,7 +875,7 @@ def _remplir_pdf_direct(pdf_bytes, nom_fich, profil_enrichi, justifs):
         for inst in insts:
             if abs(inst.y0 - y_ligne) < 8:
                 page.draw_rect(inst, color=(1,1,1), fill=(1,1,1))
-                _inserer_valeur_pdf(page, inst.x0 + 1, inst.y1 - 1, valeur)
+                _inserer_valeur_pdf(page, inst.x0 + 1, inst.y1 - 1, f"{valeur} Euros")
                 break
 
     # Voiture — km dans le champ de gauche (y≈578, x≈165)
