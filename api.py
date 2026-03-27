@@ -748,155 +748,345 @@ def _remplir_pdf_par_coordonnees(page, profil, marqueurs_coords):
         _inserer_valeur_pdf(page, x_ins, y_ins, valeur)
 
 
+def _detecter_zones_pdf(pdf_bytes):
+    """
+    Détecte dynamiquement toutes les zones à remplir dans un PDF.
+    Retourne une liste de zones avec leur label détecté et leurs coordonnées.
+    """
+    doc = fitz.open(stream=pdf_bytes, filetype="pdf")
+    zones = []
+
+    MARQUEURS_VIDES = [
+        "…………………………………… Euros",
+        "………………………………………",
+        "…………………………………",
+        "………………………………",
+        "……………………………",
+        "…………………………",
+        "………………………",
+        "……………………",
+        "…………………",
+        "………………",
+        "……………",
+        "…………",
+        "………",
+        "……",
+        "............................................................................",
+        "...................................................................",
+        "................................................................",
+        ".............................................................",
+        ".........................................................",
+        "......................................................",
+        "...................................................",
+        "................................................",
+        ".............................................",
+        "...........................................",
+        ".........................................",
+        ".......................................",
+        ".....................................",
+        "...................................",
+        ".................................",
+        "...............................",
+        ".............................",
+        "...........................",
+        ".........................",
+        ".......................",
+        ".....................",
+        "...................",
+        ".................",
+        "...............",
+        ".............",
+        "...........",
+        ".........",
+        ".......",
+        "......",
+        "(jj/mm/aa)",
+        "(jj/mm/aaaa)",
+        "____________________",
+        "__________________",
+        "________________",
+        "______________",
+    ]
+
+    for page_num, page in enumerate(doc):
+        # Extraire tous les mots avec leurs positions
+        words = page.get_text("words")  # (x0, y0, x1, y1, word, block, line, word_idx)
+
+        # Chercher chaque marqueur
+        zones_trouvees_y = set()  # éviter doublons sur même ligne
+
+        for marqueur in MARQUEURS_VIDES:
+            instances = page.search_for(marqueur)
+            for inst in instances:
+                y_key = round(inst.y0)
+                if y_key in zones_trouvees_y:
+                    continue
+                zones_trouvees_y.add(y_key)
+
+                # Trouver le label le plus proche à gauche ou au-dessus
+                label = _trouver_label_proche(words, inst, page)
+
+                zones.append({
+                    "page": page_num,
+                    "marqueur": marqueur,
+                    "rect": [inst.x0, inst.y0, inst.x1, inst.y1],
+                    "label": label,
+                    "x_insert": inst.x0 + 1,
+                    "y_insert": inst.y1 - 1,
+                })
+
+    doc.close()
+    return zones
+
+
+def _trouver_label_proche(words, rect, page):
+    """
+    Trouve le label textuel le plus proche à gauche ou au-dessus d'une zone.
+    Exclut les marqueurs de zones vides.
+    """
+    MOTS_EXCLUS = {
+        "euros", "eur", "€", "x", "0,5", "km", ":",
+        "………", "......", "____", "(jj/mm/aa)", "(jj/mm/aaaa)"
+    }
+
+    # Chercher les mots sur la même ligne (±8px) à gauche
+    candidats_gauche = []
+    for w in words:
+        wx0, wy0, wx1, wy1, word = w[0], w[1], w[2], w[3], w[4]
+        mot = word.strip().lower().rstrip(":").strip()
+        if mot in MOTS_EXCLUS or len(mot) < 2:
+            continue
+        if abs(wy0 - rect.y0) < 10 and wx1 <= rect.x0 + 5:
+            dist = rect.x0 - wx1
+            candidats_gauche.append((dist, word.strip()))
+
+    if candidats_gauche:
+        # Prendre le mot le plus proche à gauche
+        candidats_gauche.sort(key=lambda x: x[0])
+        # Reconstruire le label depuis les mots proches
+        mots_label = []
+        for dist, mot in candidats_gauche[:4]:
+            if dist < 150:
+                mots_label.insert(0, mot)
+        return " ".join(mots_label).strip().rstrip(":")
+
+    # Sinon chercher au-dessus (±30px)
+    candidats_dessus = []
+    for w in words:
+        wx0, wy0, wx1, wy1, word = w[0], w[1], w[2], w[3], w[4]
+        mot = word.strip().lower().rstrip(":").strip()
+        if mot in MOTS_EXCLUS or len(mot) < 2:
+            continue
+        if wy1 <= rect.y0 and wy1 >= rect.y0 - 30:
+            dist = rect.y0 - wy1
+            candidats_dessus.append((dist, word.strip()))
+
+    if candidats_dessus:
+        candidats_dessus.sort(key=lambda x: x[0])
+        return candidats_dessus[0][1].rstrip(":")
+
+    return ""
+
+
 def _remplir_pdf_direct(pdf_bytes, nom_fich, profil_enrichi, justifs):
     """
-    Remplit un PDF directement avec PyMuPDF par coordonnées fixes.
+    Remplit un PDF dynamiquement — fonctionne avec N'IMPORTE QUEL formulaire PDF.
 
-    Stratégie en 2 passes :
-    1. Mapping direct par coordonnées connues (champs standards)
-    2. Claude pour les champs non-standards détectés dans le PDF
+    Stratégie :
+    1. Détecter automatiquement toutes les zones à remplir (marqueurs + coordonnées)
+    2. Envoyer à Claude : zones détectées + profil + justificatifs
+    3. Claude retourne le mapping zone → valeur
+    4. Insérer les valeurs aux coordonnées exactes avec PyMuPDF
     """
     p = profil_enrichi
 
-    # ── Déterminer la civilité à cocher ──────────────────────────────────────
-    CIVILITES = {
-        "pr": ("q Pr", 42, 397),
-        "dr": ("q Dr", 80, 397),
-        "m.": ("q M.", 118, 397),
-        "m":  ("q M.", 118, 397),
-        "mme": ("q Mme", 156, 397),
-        "mlle": ("q Mlle", 200, 397),
-    }
-    civilite_raw = str(p.get("civilite", "")).lower().strip().rstrip(".")
-    civ_key = civilite_raw + "." if civilite_raw in ("m", "pr", "dr") else civilite_raw
-    civ_data = CIVILITES.get(civ_key) or CIVILITES.get(civilite_raw)
+    # ── 1. Détecter toutes les zones à remplir ────────────────────────────────
+    zones = _detecter_zones_pdf(pdf_bytes)
 
-    # ── Ouvrir le PDF ─────────────────────────────────────────────────────────
-    doc = fitz.open(stream=pdf_bytes, filetype="pdf")
-    page = doc[0]
+    if not zones:
+        print("[REMPLIR_PDF] Aucune zone détectée, retour PDF original")
+        return pdf_bytes
 
-    # ── PASSE 1 : Champs standards par coordonnées fixes ─────────────────────
-    # Coordonnées issues de l'analyse réelle du formulaire SFPC
-    # Format : (marqueur_à_effacer, x_insertion, y_insertion, valeur)
+    # ── 2. Construire la représentation pour Claude ───────────────────────────
+    zones_str = "\n".join(
+        f"[{i}] label='{z['label']}' marqueur='{z['marqueur'][:20]}' "
+        f"x={z['x_insert']:.0f} y={z['y_insert']:.0f} page={z['page']}"
+        for i, z in enumerate(zones)
+    )
 
-    # Nom — 1er bloc de pointillés sur la ligne y≈408, x≈69
-    if p.get("nom"):
-        insts = page.search_for("......")
-        for inst in insts:
-            if abs(inst.y0 - 408) < 8 and inst.x0 < 200:
-                page.draw_rect(inst, color=(1,1,1), fill=(1,1,1))
-                _inserer_valeur_pdf(page, inst.x0 + 1, inst.y1 - 1, p["nom"])
-                break
+    justif_bloc = _construire_justif_bloc(justifs)
 
-    # Prénom — 2e bloc de pointillés sur la ligne y≈408, x≈338
-    if p.get("prenom"):
-        insts = page.search_for("......")
-        for inst in insts:
-            if abs(inst.y0 - 408) < 8 and inst.x0 > 300:
-                page.draw_rect(inst, color=(1,1,1), fill=(1,1,1))
-                _inserer_valeur_pdf(page, inst.x0 + 1, inst.y1 - 1, p["prenom"])
-                break
+    system = (
+        "Tu es un assistant expert en administration française. "
+        "Tu analyses des formulaires et associes les zones vides aux bonnes valeurs du profil. "
+        "Tu retournes UNIQUEMENT un objet JSON valide, sans texte avant ni après, sans balises markdown."
+    )
 
-    # Ville — y≈430
-    if p.get("ville"):
-        insts = page.search_for("......")
-        for inst in insts:
-            if abs(inst.y0 - 430) < 8:
-                page.draw_rect(inst, color=(1,1,1), fill=(1,1,1))
-                _inserer_valeur_pdf(page, inst.x0 + 1, inst.y1 - 1, p["ville"])
-                break
+    user = f"""Voici les zones vides détectées dans un formulaire PDF :
+(chaque zone a un label détecté automatiquement et des coordonnées d'insertion)
 
-    # Téléphone — y≈452
-    if p.get("telephone"):
-        insts = page.search_for("......")
-        for inst in insts:
-            if abs(inst.y0 - 452) < 8:
-                page.draw_rect(inst, color=(1,1,1), fill=(1,1,1))
-                _inserer_valeur_pdf(page, inst.x0 + 1, inst.y1 - 1, p["telephone"])
-                break
+{zones_str}
 
-    # Email — y≈474
-    if p.get("email"):
-        insts = page.search_for("......")
-        for inst in insts:
-            if abs(inst.y0 - 474) < 8:
-                page.draw_rect(inst, color=(1,1,1), fill=(1,1,1))
-                _inserer_valeur_pdf(page, inst.x0 + 1, inst.y1 - 1, p["email"])
-                break
+Profil de la personne :
+{json.dumps(p, ensure_ascii=False, indent=2)}
+{justif_bloc}
 
-    # Civilité — cocher la bonne case
-    if civ_data:
-        marqueur_civ, x_civ, y_civ = civ_data
-        insts_civ = page.search_for(marqueur_civ)
-        for inst in insts_civ:
-            page.draw_rect(inst, color=(1,1,1), fill=(1,1,1))
-            label = marqueur_civ.replace("q ", "[X] ")
-            _inserer_valeur_pdf(page, inst.x0, inst.y1 - 1, label, fontsize=8)
+Retourne un JSON avec les valeurs à insérer pour chaque zone :
+{{
+  "remplissages": [
+    {{"index": 0, "valeur": "DUPONT"}},
+    {{"index": 1, "valeur": "Marie"}}
+  ]
+}}
+
+RÈGLES ABSOLUES :
+1. "index" = index [N] de la zone dans la liste ci-dessus
+2. "valeur" = UNIQUEMENT la donnée à insérer
+
+MAPPING NOM/PRÉNOM :
+- label contient "nom" (sans "prénom") → profil["nom"] = NOM DE FAMILLE uniquement
+- label contient "prénom" → profil["prenom"] = PRÉNOM uniquement
+- Ne jamais mettre nom+prénom ensemble dans un seul champ
+
+MAPPING TABLEAU VOYAGE (labels "Train", "Avion", "Taxi", etc.) :
+- label "Train" ou contient "train" → profil["frais_train"] + " Euros"
+- label "Avion" → profil["frais_avion"] + " Euros"
+- label "Taxi" → profil["frais_taxi"] + " Euros"
+- label "Péage" → profil["frais_peage"] + " Euros"
+- label "Voiture" ou "km" → profil["frais_voiture"] + " Euros"
+- label "Montant total" ou "total" → profil["montant_total"] + " Euros"
+- label "Départ" ou "départ" → profil["date_depart"]
+- label "Arrivée" ou "arrivée" → profil["date_arrivee"]
+- label "Autre" → laisser vide sauf si frais "autre" existent
+
+AUTRES MAPPINGS COURANTS :
+- label "ville" → profil["ville"]
+- label "téléphone" ou "tél" → profil["telephone"]
+- label "email" ou "e-mail" ou "mail" → profil["email"]
+- label "civilité" ou cases □ Pr □ Dr □ M → profil["civilite"]
+- label "iban" → profil["iban"]
+- label "date" (champ signature) → date du jour
+
+Si une valeur n'est pas dans le profil → ne pas inclure cet index.
+
+JSON :"""
+
+    import time
+    last_error = None
+    raw = ""
+    for tentative in range(3):
+        try:
+            response = claude.messages.create(
+                model=CLAUDE_MODEL, max_tokens=2000,
+                system=system,
+                messages=[{"role": "user", "content": user}]
+            )
+            raw = response.content[0].text.strip()
             break
+        except Exception as e:
+            last_error = e
+            if "529" in str(e) or "overloaded" in str(e).lower():
+                print(f"[REMPLIR_PDF] API surchargée tentative {tentative+1}/3")
+                time.sleep(2 ** tentative)
+            else:
+                raise
+    else:
+        raise last_error
 
-    # Tableau VOYAGE — ellipses à x≈349, y variable
-    # Départ — (jj/mm/aa) à y≈542, insérer dans la cellule droite x≈340
-    if p.get("date_depart"):
-        insts = page.search_for("(jj/mm/aa)")
-        for inst in insts:
-            if abs(inst.y0 - 542) < 8:
-                page.draw_rect(inst, color=(1,1,1), fill=(1,1,1))
-                _inserer_valeur_pdf(page, 340, inst.y1 - 1, p["date_depart"])
-                break
+    if raw.startswith("```"):
+        parts = raw.split("```")
+        raw = parts[1] if len(parts) > 1 else raw
+        if raw.startswith("json"):
+            raw = raw[4:]
+    raw = raw.strip()
 
-    # Arrivée — (jj/mm/aa) à y≈560
-    if p.get("date_arrivee"):
-        insts = page.search_for("(jj/mm/aa)")
-        for inst in insts:
-            if abs(inst.y0 - 560) < 8:
-                page.draw_rect(inst, color=(1,1,1), fill=(1,1,1))
-                _inserer_valeur_pdf(page, 340, inst.y1 - 1, p["date_arrivee"])
-                break
+    try:
+        result = json.loads(raw)
+        remplissages = {str(r["index"]): r["valeur"] for r in result.get("remplissages", [])}
+    except (json.JSONDecodeError, KeyError):
+        print(f"[REMPLIR_PDF] JSON invalide: {raw[:200]}")
+        remplissages = {}
 
-    # Montants du tableau — ellipses à x≈349
-    # y≈578 Voiture, y≈596 Train, y≈614 Avion, y≈632 Taxi, y≈650 Péage, y≈668 Autre, y≈687 Total
-    LIGNES_MONTANTS = [
-        (578, "frais_voiture"),
-        (596, "frais_train"),
-        (614, "frais_avion"),
-        (632, "frais_taxi"),
-        (650, "frais_peage"),
-        (668, None),          # Autre — laisser vide sauf si explicite
-        (687, "montant_total"),
-    ]
+    print(f"[REMPLIR_PDF] {len(zones)} zones détectées, {len(remplissages)} remplissages")
 
-    MARQUEUR_MONTANT = "…………………………………… Euros"
+    # ── 3. Gérer la civilité séparément (cases à cocher) ─────────────────────
+    civilite_valeur = p.get("civilite", "")
 
-    for y_ligne, cle_profil in LIGNES_MONTANTS:
-        valeur = p.get(cle_profil, "") if cle_profil else ""
-        if not valeur:
-            continue
-        insts = page.search_for(MARQUEUR_MONTANT)
-        for inst in insts:
-            if abs(inst.y0 - y_ligne) < 8:
-                page.draw_rect(inst, color=(1,1,1), fill=(1,1,1))
-                _inserer_valeur_pdf(page, inst.x0 + 1, inst.y1 - 1, f"{valeur} Euros")
-                break
+    # ── 4. Appliquer les insertions avec PyMuPDF ──────────────────────────────
+    doc = fitz.open(stream=pdf_bytes, filetype="pdf")
 
-    # Voiture — km dans le champ de gauche (y≈578, x≈165)
-    if p.get("km_voiture"):
-        insts = page.search_for("………")
-        for inst in insts:
-            if abs(inst.y0 - 578) < 8 and inst.x0 < 300:
-                page.draw_rect(inst, color=(1,1,1), fill=(1,1,1))
-                _inserer_valeur_pdf(page, inst.x0 + 1, inst.y1 - 1, p["km_voiture"])
-                break
+    for idx_str, valeur in remplissages.items():
+        try:
+            idx = int(idx_str)
+            if idx >= len(zones):
+                continue
+            zone = zones[idx]
+            valeur = str(valeur).strip()
+            if not valeur:
+                continue
 
-    # Date de signature — date du jour automatique
+            page = doc[zone["page"]]
+            marqueur = zone["marqueur"]
+            rect_zone = zone["rect"]
+
+            # Effacer le marqueur
+            instances = page.search_for(marqueur)
+            for inst in instances:
+                if abs(inst.y0 - rect_zone[1]) < 10:
+                    page.draw_rect(inst, color=(1, 1, 1), fill=(1, 1, 1))
+                    break
+
+            # Insérer la valeur
+            fontsize = max(7, min(10, (rect_zone[3] - rect_zone[1]) * 0.75))
+            page.insert_text(
+                (zone["x_insert"], zone["y_insert"]),
+                valeur,
+                fontsize=fontsize,
+                color=(0, 0, 0),
+                fontname="helv"
+            )
+
+        except Exception as e:
+            print(f"[REMPLIR_PDF] Erreur zone {idx_str}: {e}")
+
+    # ── 5. Gérer les cases à cocher civilité ─────────────────────────────────
+    if civilite_valeur:
+        for page_num in range(len(doc)):
+            page = doc[page_num]
+            CIVILITES_MAP = {
+                "pr": "q Pr", "dr": "q Dr",
+                "m.": "q M.", "m": "q M.",
+                "mme": "q Mme", "mlle": "q Mlle"
+            }
+            civ_key = civilite_valeur.lower().strip().rstrip(".")
+            marqueur_civ = CIVILITES_MAP.get(civ_key + ".") or CIVILITES_MAP.get(civ_key)
+            if marqueur_civ:
+                insts = page.search_for(marqueur_civ)
+                for inst in insts:
+                    page.draw_rect(inst, color=(1, 1, 1), fill=(1, 1, 1))
+                    label = marqueur_civ.replace("q ", "[X] ")
+                    page.insert_text(
+                        (inst.x0, inst.y1 - 1),
+                        label,
+                        fontsize=8, color=(0, 0, 0), fontname="helv"
+                    )
+                    break
+
+    # ── 6. Date du jour automatique ───────────────────────────────────────────
     from datetime import date as _date
     date_aujourd_hui = _date.today().strftime("%d/%m/%Y")
-    date_sig = p.get("date_signature") or p.get("date_aujourd_hui") or date_aujourd_hui
-    insts = page.search_for("Date:")
-    for inst in insts:
-        _inserer_valeur_pdf(page, inst.x1 + 5, inst.y1 - 1, date_sig)
-        break
+    for page_num in range(len(doc)):
+        page = doc[page_num]
+        insts = page.search_for("Date:")
+        for inst in insts:
+            page.insert_text(
+                (inst.x1 + 5, inst.y1 - 1),
+                date_aujourd_hui,
+                fontsize=9, color=(0, 0, 0), fontname="helv"
+            )
+            break
 
-    # ── Sauvegarder ───────────────────────────────────────────────────────────
+    # ── 7. Sauvegarder ───────────────────────────────────────────────────────
     output = io.BytesIO()
     doc.save(output)
     doc.close()
