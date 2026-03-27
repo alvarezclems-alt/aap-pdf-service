@@ -887,13 +887,14 @@ def _remplir_pdf_direct(pdf_bytes, nom_fich, profil_enrichi, justifs):
                 _inserer_valeur_pdf(page, inst.x0 + 1, inst.y1 - 1, p["km_voiture"])
                 break
 
-    # Date de signature — y≈714
-    if p.get("date_signature") or p.get("date_aujourd_hui"):
-        date_sig = p.get("date_signature") or p.get("date_aujourd_hui", "")
-        insts = page.search_for("Date:")
-        for inst in insts:
-            _inserer_valeur_pdf(page, inst.x1 + 5, inst.y1 - 1, date_sig)
-            break
+    # Date de signature — date du jour automatique
+    from datetime import date as _date
+    date_aujourd_hui = _date.today().strftime("%d/%m/%Y")
+    date_sig = p.get("date_signature") or p.get("date_aujourd_hui") or date_aujourd_hui
+    insts = page.search_for("Date:")
+    for inst in insts:
+        _inserer_valeur_pdf(page, inst.x1 + 5, inst.y1 - 1, date_sig)
+        break
 
     # ── Sauvegarder ───────────────────────────────────────────────────────────
     output = io.BytesIO()
