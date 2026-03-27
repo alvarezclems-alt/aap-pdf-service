@@ -937,6 +937,15 @@ def _remplir_pdf_direct(pdf_bytes, nom_fich, profil_enrichi, justifs):
                 z["label"] = " ".join(m for _,m in candidats[:3] if _[0] < 300 if True).strip()
     doc_tmp.close()
 
+    # Nettoyer les labels bruités (enlever les pointillés et valeurs précédentes)
+    import re as _re
+    for z in zones:
+        # Supprimer les suites de points et ellipses du label
+        label_clean = _re.sub(r'[.…]{3,}', '', z["label"])
+        # Supprimer les mots en majuscules qui ressemblent à des valeurs (noms propres déjà insérés)
+        label_clean = _re.sub(r'\b[A-Z]{2,}\b', '', label_clean)
+        z["label"] = " ".join(label_clean.split()).strip().rstrip(":")
+
     # Construire la représentation pour Claude
     zones_str = "\n".join(
         f"[{i}] label='{z['label']}' marqueur='{z['marqueur'][:25]}' "
@@ -973,10 +982,12 @@ RÈGLES ABSOLUES :
 1. "index" = index [N] de la zone dans la liste ci-dessus
 2. "valeur" = UNIQUEMENT la donnée à insérer
 
-MAPPING NOM/PRÉNOM :
-- label contient "nom" (sans "prénom") → profil["nom"] = NOM DE FAMILLE uniquement
-- label contient "prénom" → profil["prenom"] = PRÉNOM uniquement
-- Ne jamais mettre nom+prénom ensemble dans un seul champ
+MAPPING NOM/PRÉNOM — BASÉ SUR POSITION X :
+- Si label contient "prénom" OU x_insert > 300 ET sur la même ligne qu'un champ "nom" → profil["prenom"]
+- Si label contient "nom" (sans "prénom") OU x_insert < 300 → profil["nom"] = NOM DE FAMILLE
+- Règle absolue : NOM DE FAMILLE ≠ PRÉNOM, toujours les séparer
+- profil["nom"] = "{profil.get('nom','')}" → champ Nom
+- profil["prenom"] = "{profil.get('prenom','')}" → champ Prénom
 
 MAPPING TABLEAU VOYAGE (labels "Train", "Avion", "Taxi", etc.) :
 - label "Train" ou contient "train" → profil["frais_train"] + " Euros"
