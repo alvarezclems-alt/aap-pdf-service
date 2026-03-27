@@ -1047,6 +1047,23 @@ JSON :"""
         print(f"[REMPLIR_PDF] JSON invalide: {raw[:200]}")
         remplissages = {}
 
+    # Ajouter " Euros" sur les zones qui contiennent "Euros" dans leur marqueur
+    LABELS_MONTANTS = {"train", "avion", "taxi", "péage", "péage", "voiture", "total", "autre"}
+    for idx_str, valeur in list(remplissages.items()):
+        try:
+            idx = int(idx_str)
+            if idx < len(zones):
+                z = zones[idx]
+                label_low = z["label"].lower()
+                marqueur = z["marqueur"]
+                if "Euros" in marqueur or any(m in label_low for m in LABELS_MONTANTS):
+                    # S'assurer que la valeur se termine par Euros
+                    val_str = str(valeur).strip()
+                    if val_str and "euros" not in val_str.lower():
+                        remplissages[idx_str] = val_str + " Euros"
+        except (ValueError, IndexError):
+            pass
+
     print(f"[REMPLIR_PDF] {len(zones)} zones détectées, {len(remplissages)} remplissages")
 
     # ── 3. Forcer Nom/Prénom directement dans le PDF ─────────────────────────
