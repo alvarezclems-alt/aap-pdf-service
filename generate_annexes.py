@@ -3,7 +3,8 @@ generate_annexes.py — v4
 Génère pixel-perfect les Annexe 1 et Annexe 1bis AAP INSPÉ Lille HdF
 Robuste aux textes longs, caractères spéciaux et Markdown brut.
 """
-import io, re
+import io
+import re
 from reportlab.lib.pagesizes import A4
 from reportlab.lib import colors
 from reportlab.lib.styles import ParagraphStyle
@@ -29,16 +30,48 @@ PAGE_W, PAGE_H = A4
 ML, MR, MT, MB = 65.5, 46.3, 56.0, 48.0
 CW = PAGE_W - ML - MR   # 483.5 pts
 
+# ─── Police de base ───────────────────────────────────────────────────────────
+FONT = "Helvetica"
+
+
+def sanitize(val):
+    if val is None or str(val).strip() == "":
+        return " "
+    return str(val)
+
+
 # ─── Styles ───────────────────────────────────────────────────────────────────
-def _s(name, font='Helvetica', size=10, align=TA_LEFT, color=BLACK,
+def _s(name, font=FONT, size=10, align=TA_LEFT, color=BLACK,
        bold=False, italic=False, space_before=0, space_after=4, leading=None):
-    fn = font
-    if bold and italic: fn += '-BoldOblique'
-    elif bold:          fn += '-Bold'
-    elif italic:        fn += '-Oblique'
-    return ParagraphStyle(name, fontName=fn, fontSize=size, alignment=align,
-                          textColor=color, spaceBefore=space_before,
-                          spaceAfter=space_after, leading=leading or size * 1.25)
+    if font == "Helvetica":
+        if bold and italic:
+            fn = "Helvetica-BoldOblique"
+        elif bold:
+            fn = "Helvetica-Bold"
+        elif italic:
+            fn = "Helvetica-Oblique"
+        else:
+            fn = "Helvetica"
+    else:
+        fn = font
+        if bold and italic:
+            fn += "-BoldOblique"
+        elif bold:
+            fn += "-Bold"
+        elif italic:
+            fn += "-Oblique"
+
+    return ParagraphStyle(
+        name,
+        fontName=fn,
+        fontSize=size,
+        alignment=align,
+        textColor=color,
+        spaceBefore=space_before,
+        spaceAfter=space_after,
+        leading=leading or size * 1.25
+    )
+
 
 S = {
     'title':    _s('title',    size=14, bold=True,   align=TA_CENTER, space_after=3),
@@ -61,11 +94,17 @@ class AAPDocTemplate(BaseDocTemplate):
     def __init__(self, buf, logo_bytes=None, **kw):
         self._logo = logo_bytes
         super().__init__(buf, **kw)
-        frame = Frame(ML, MB, CW, PAGE_H - MT - MB - 70,
-                      id='main', leftPadding=0, rightPadding=0,
-                      topPadding=0, bottomPadding=0)
-        self.addPageTemplates([PageTemplate(id='main', frames=[frame],
-                                            onPage=self._header_footer)])
+        frame = Frame(
+            ML, MB, CW, PAGE_H - MT - MB - 70,
+            id='main',
+            leftPadding=0,
+            rightPadding=0,
+            topPadding=0,
+            bottomPadding=0
+        )
+        self.addPageTemplates([
+            PageTemplate(id='main', frames=[frame], onPage=self._header_footer)
+        ])
 
     def _header_footer(self, cv, doc):
         cv.saveState()
@@ -73,16 +112,20 @@ class AAPDocTemplate(BaseDocTemplate):
             logo_w, logo_h = 238, 51
             x = (PAGE_W - logo_w) / 2
             y = PAGE_H - MT - 8
-            cv.drawImage(ImageReader(io.BytesIO(self._logo)), x, y,
-                         width=logo_w, height=logo_h,
-                         preserveAspectRatio=True, mask='auto')
-        cv.setFont('Helvetica', 9)
+            cv.drawImage(
+                ImageReader(io.BytesIO(self._logo)),
+                x, y,
+                width=logo_w,
+                height=logo_h,
+                preserveAspectRatio=True,
+                mask='auto'
+            )
+        cv.setFont(FONT if FONT != "Helvetica" else "Helvetica", 9)
         cv.setFillColor(colors.Color(0.4, 0.4, 0.4))
         cv.drawRightString(PAGE_W - MR, 26, str(doc.page))
         cv.restoreState()
 
 # ─── Helpers texte sécurisé ───────────────────────────────────────────────────
-
 def strip_html(text: str) -> str:
     """
     Supprime toutes les balises HTML d'un texte.
@@ -91,11 +134,8 @@ def strip_html(text: str) -> str:
     """
     if not text:
         return ''
-    # <br> et <br/> → saut de ligne
     text = re.sub(r'<br\s*/?>', '\n', text, flags=re.IGNORECASE)
-    # Supprimer toutes les autres balises HTML
     text = re.sub(r'<[^>]+>', '', text)
-    # Décoder les entités HTML courantes
     text = text.replace('&amp;', '&')
     text = text.replace('&lt;', '<').replace('&gt;', '>')
     text = text.replace('&nbsp;', ' ')
@@ -111,36 +151,24 @@ def strip_markdown(text: str) -> str:
     """
     if not text:
         return ''
-    # D'abord supprimer les balises HTML éventuelles
     text = strip_html(str(text))
-    # Supprimer les blocs de code fenced (``` ... ```)
     text = re.sub(r'```[\s\S]*?```', '', text)
-    # Supprimer les séparateurs --- / ===
     text = re.sub(r'^[-=]{3,}\s*$', '', text, flags=re.MULTILINE)
-    # Titres ### ## # → garder uniquement le texte
     text = re.sub(r'^#{1,6}\s+', '', text, flags=re.MULTILINE)
-    # Gras/italique **text** ou __text__ → text
     text = re.sub(r'\*\*(.+?)\*\*', r'\1', text)
     text = re.sub(r'__(.+?)__', r'\1', text)
-    # Italique *text* ou _text_ → text
     text = re.sub(r'\*(.+?)\*', r'\1', text)
     text = re.sub(r'_(.+?)_', r'\1', text)
-    # Liens [texte](url) → texte
     text = re.sub(r'\[([^\]]+)\]\([^\)]+\)', r'\1', text)
-    # Puces * - + en début de ligne → •
     text = re.sub(r'^[\*\-\+]\s+', '• ', text, flags=re.MULTILINE)
-    # Supprimer les lignes de tableau Markdown (|----|)
     text = re.sub(r'^\s*\|[-:\s|]+\|\s*$', '', text, flags=re.MULTILINE)
-    # Nettoyer les lignes vides multiples
     text = re.sub(r'\n{3,}', '\n\n', text)
     return text.strip()
 
 
 def safe_xml(text: str, max_chars: int = 4000) -> str:
     """Échappe uniquement & sans toucher aux balises HTML — pour texte hardcodé."""
-    if not text:
-        return ''
-    text = str(text)
+    text = sanitize(text)
     if len(text) > max_chars:
         text = text[:max_chars] + '…'
     text = re.sub(r'&(?!amp;|lt;|gt;|nbsp;|quot;)', '&amp;', text)
@@ -149,9 +177,8 @@ def safe_xml(text: str, max_chars: int = 4000) -> str:
 
 def clean(text: str, max_chars: int = 4000) -> str:
     """Strip HTML/Markdown utilisateur puis échappe XML pour ReportLab."""
-    if not text:
-        return ''
-    text = strip_html(str(text))
+    text = sanitize(text)
+    text = strip_html(text)
     if len(text) > max_chars:
         text = text[:max_chars] + '…'
     text = text.replace('&', '&amp;')
@@ -161,7 +188,7 @@ def clean(text: str, max_chars: int = 4000) -> str:
 
 def clean_md(text: str, max_chars: int = 4000) -> str:
     """Strip HTML + Markdown PUIS échappe XML — pour les champs texte libre."""
-    return clean(strip_markdown(str(text or '')), max_chars)
+    return clean(strip_markdown(sanitize(text)), max_chars)
 
 
 def para(text: str, style, max_chars: int = 4000) -> Paragraph:
@@ -173,7 +200,7 @@ def para(text: str, style, max_chars: int = 4000) -> Paragraph:
         return Paragraph(safe_xml(text, max_chars), style)
     except Exception:
         try:
-            safe = re.sub(r'[^\x20-\x7E\n]', ' ', str(text))[:max_chars]
+            safe = re.sub(r'[^\x20-\x7E\n]', ' ', sanitize(text))[:max_chars]
             return Paragraph(safe, style)
         except Exception:
             return Paragraph('(texte non affichable)', style)
@@ -188,7 +215,7 @@ def para_user(text: str, style, max_chars: int = 4000) -> Paragraph:
         return Paragraph(clean(text, max_chars), style)
     except Exception:
         try:
-            safe = re.sub(r'[^\x20-\x7E\n]', ' ', str(text))[:max_chars]
+            safe = re.sub(r'[^\x20-\x7E\n]', ' ', sanitize(text))[:max_chars]
             return Paragraph(safe, style)
         except Exception:
             return Paragraph('(texte non affichable)', style)
@@ -221,14 +248,14 @@ def form_table(rows: list, col1_w: float = 168) -> Table:
     col2_w = CW - col1_w
     data = []
     for lbl_raw, val in rows:
+        lbl_raw = sanitize(lbl_raw)
         bold = lbl_raw.startswith('**')
         lbl_txt = lbl_raw[2:] if bold else lbl_raw
-        # Labels hardcodés : safe_xml conserve le HTML ReportLab
         lbl_clean = safe_xml(strip_html(lbl_txt))
         p_lbl = para(f'<b>{lbl_clean}</b>' if bold else lbl_clean, S['lbl'])
-        # Valeurs utilisateur : strip HTML/Markdown brut
-        p_val = para_user(clean_md(str(val or ''), 2000), S['val'])
+        p_val = para_user(clean_md(sanitize(val), 2000), S['val'])
         data.append([p_lbl, p_val])
+
     ts = TableStyle([
         ('BOX',           (0, 0), (-1, -1), 0.5, BLACK),
         ('INNERGRID',     (0, 0), (-1, -1), 0.3, BLACK),
@@ -244,7 +271,7 @@ def form_table(rows: list, col1_w: float = 168) -> Table:
 
 def text_box(text: str, min_height: float = 60) -> Table:
     return Table(
-        [[para_md(str(text or ''), S['body'], max_chars=4000)]],
+        [[para_md(sanitize(text), S['body'], max_chars=4000)]],
         colWidths=[CW],
         style=TableStyle([
             ('BOX',           (0, 0), (-1, -1), 0.5, BLACK),
@@ -262,8 +289,8 @@ def fmt_eur(v) -> str:
         if f == 0:
             return '0,00 €'
         return f'{f:,.2f}'.replace(',', ' ').replace('.', ',') + ' €'
-    except:
-        return str(v)
+    except Exception:
+        return sanitize(v)
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -271,13 +298,18 @@ def fmt_eur(v) -> str:
 # ═══════════════════════════════════════════════════════════════════════════════
 def build_annexe1(project: dict, logo_bytes: bytes = None) -> bytes:
     buf = io.BytesIO()
-    doc = AAPDocTemplate(buf, logo_bytes=logo_bytes, pagesize=A4,
-                         topMargin=MT + 70, bottomMargin=MB,
-                         leftMargin=ML, rightMargin=MR)
+    doc = AAPDocTemplate(
+        buf,
+        logo_bytes=logo_bytes,
+        pagesize=A4,
+        topMargin=MT + 70,
+        bottomMargin=MB,
+        leftMargin=ML,
+        rightMargin=MR
+    )
     story = []
     coord = project.get('coordinateur', {}) or {}
 
-    # Titre
     story += [
         sp(10),
         para('<b>Annexe 1</b>', S['title']),
@@ -287,15 +319,13 @@ def build_annexe1(project: dict, logo_bytes: bytes = None) -> bytes:
         sp(14),
     ]
 
-    # ── Section 1 ──────────────────────────────────────────────────────────────
     story.append(para('<b>1.  Identification précise du projet et de son porteur/ses porteurs</b>', S['h1']))
     story.append(sp(4))
 
-    # A) Identité
     story.append(section_box('A) Identité du projet'))
     story.append(sp(4))
     mots = project.get('mots_cles', [])
-    mots_str = ', '.join(mots) if isinstance(mots, list) else str(mots or '')
+    mots_str = ', '.join(mots) if isinstance(mots, list) else sanitize(mots)
     story.append(form_table([
         ('Titre du projet:',           project.get('titre', '')),
         ('Acronyme (éventuellement):', project.get('acronyme', '')),
@@ -303,7 +333,6 @@ def build_annexe1(project: dict, logo_bytes: bytes = None) -> bytes:
     ]))
     story.append(sp(10))
 
-    # B) Résumé
     story.append(section_box('B) Résumé (10 lignes maximum)'))
     story.append(sp(4))
     story.append(text_box(project.get('resume', ''), min_height=90))
@@ -312,7 +341,6 @@ def build_annexe1(project: dict, logo_bytes: bytes = None) -> bytes:
         S['body_sm']))
     story.append(PageBreak())
 
-    # C) Coordinateur
     story.append(section_box('C) Identification du porteur (coordinateur et unité de recherche) du projet'))
     story.append(sp(5))
     story.append(para(
@@ -320,35 +348,24 @@ def build_annexe1(project: dict, logo_bytes: bytes = None) -> bytes:
         S['body_it']))
     story.append(sp(6))
 
-    ur_val = coord.get('ur_id', '')
-    ur_nom = coord.get('ur_nom', '')
-    ur_full = f"{ur_val} – {ur_nom}".strip(' –') if (ur_val or ur_nom) else ''
+    ur_val = sanitize(coord.get('ur_id', ''))
+    ur_nom = sanitize(coord.get('ur_nom', ''))
+    ur_full = f"{ur_val} – {ur_nom}".strip(' –') if (ur_val.strip() or ur_nom.strip()) else ''
 
     story.append(form_table([
-        ('**Coordinateur\n(Nom, Prénom):',
-         coord.get('nom', '')),
-        ('Titre/Grade:',
-         coord.get('grade', '')),
-        ('Courriel:',
-         coord.get('email', '')),
-        ('Téléphone:',
-         coord.get('telephone', '')),
-        ('Institution de rattachement\n(Nom et adresse):',
-         coord.get('institution', '')),
-        ('**UR de rattachement\n(identifiant EA UMR, nom et adresse):',
-         ur_full),
-        ("Directeur de l'UR\n(Nom, prénom et courriel de contact):",
-         coord.get('ur_directeur', '')),
-        ("Gestionnaire de l'UR\n(si Applicable - Nom, prénom, courriel):",
-         coord.get('ur_gestionnaire', '')),
-        ("Tutelle de gestion de l'UR pour ce projet\n(Nom et adresse):",
-         coord.get('ur_tutelle', '')),
-        ('**Autres membres de l\'UR impliqués\ndans le projet\n(Nom, prénom, titre, courriel):',
-         coord.get('membres', '')),
+        ('**Coordinateur\n(Nom, Prénom):', coord.get('nom', '')),
+        ('Titre/Grade:', coord.get('grade', '')),
+        ('Courriel:', coord.get('email', '')),
+        ('Téléphone:', coord.get('telephone', '')),
+        ('Institution de rattachement\n(Nom et adresse):', coord.get('institution', '')),
+        ('**UR de rattachement\n(identifiant EA UMR, nom et adresse):', ur_full),
+        ("Directeur de l'UR\n(Nom, prénom et courriel de contact):", coord.get('ur_directeur', '')),
+        ("Gestionnaire de l'UR\n(si Applicable - Nom, prénom, courriel):", coord.get('ur_gestionnaire', '')),
+        ("Tutelle de gestion de l'UR pour ce projet\n(Nom et adresse):", coord.get('ur_tutelle', '')),
+        ('**Autres membres de l\'UR impliqués\ndans le projet\n(Nom, prénom, titre, courriel):', coord.get('membres', '')),
     ]))
     story.append(sp(10))
 
-    # D) Partenaires
     story.append(section_box("D) Identification des autres partenaires (autant de fiches que de partenaires)"))
     story.append(sp(4))
     partenaires = project.get('partenaires', []) or [{}]
@@ -356,15 +373,13 @@ def build_annexe1(project: dict, logo_bytes: bytes = None) -> bytes:
         story.append(para(f'<i>Partenaire n° {i + 1}</i>', S['body_it']))
         story.append(sp(3))
         story.append(form_table([
-            ('**Identité (Nom et statut)\nUnité de recherche, école, établissement, …:',
-             p.get('nom', '')),
-            ('Coordonnées:',               p.get('coordonnees', '')),
+            ('**Identité (Nom et statut)\nUnité de recherche, école, établissement, …:', p.get('nom', '')),
+            ('Coordonnées:', p.get('coordonnees', '')),
             ("Expertise(s) du partenaire:", p.get('expertise', '')),
             ('**Contact partenaire porteur\n(Nom, prénom):', p.get('contact', '')),
-            ('Titre / grade / fonction:',   p.get('titre_contact', '')),
-            ('Courriel:',                   p.get('email_contact', '')),
-            ('**Autres membres du partenaire impliqués\ndans le projet:',
-             p.get('membres_partenaire', '')),
+            ('Titre / grade / fonction:', p.get('titre_contact', '')),
+            ('Courriel:', p.get('email_contact', '')),
+            ('**Autres membres du partenaire impliqués\ndans le projet:', p.get('membres_partenaire', '')),
         ]))
         story.append(sp(5))
         story.append(para("<i>Préciser l'état actuel du partenariat :</i>", S['body_it']))
@@ -372,12 +387,11 @@ def build_annexe1(project: dict, logo_bytes: bytes = None) -> bytes:
         story.append(sp(8))
     story.append(PageBreak())
 
-    # E) Publications — strip Markdown, rendu ligne par ligne
     story.append(section_box('E) Références équipe projet : porteur et partenaire(s)'))
     story.append(sp(4))
     story.append(para("5 publications maximum du porteur et de l'équipe projet dans le domaine :", S['body']))
     story.append(sp(4))
-    pub_raw = str(project.get('publications', '') or '')
+    pub_raw = sanitize(project.get('publications', '') or '')
     pub_clean = strip_markdown(pub_raw)
     for line in pub_clean.split('\n'):
         stripped = line.strip()
@@ -389,7 +403,6 @@ def build_annexe1(project: dict, logo_bytes: bytes = None) -> bytes:
             story.append(sp(3))
     story.append(sp(12))
 
-    # ── Section 2 : Description ────────────────────────────────────────────────
     story.append(para('<b>2. Description du projet</b> (3 pages maximum)', S['h1']))
     story.append(para('<i>Faisant apparaître :</i>', S['body_it']))
     for hint in [
@@ -405,27 +418,23 @@ def build_annexe1(project: dict, logo_bytes: bytes = None) -> bytes:
         story.append(para(hint, S['body']))
     story.append(sp(5))
 
-    desc_raw = str(project.get('description', '') or '')
+    desc_raw = sanitize(project.get('description', '') or '')
 
     def render_rich_text(raw: str, story_list: list):
-        """Rend un texte en préservant les titres de section en gras."""
         lines = raw.split('\n')
         for line in lines:
             stripped = line.strip()
             if not stripped:
                 story_list.append(sp(3))
                 continue
-            # Titre Markdown ## ou ### → gras
             if re.match(r'^#{1,4}\s+', stripped):
                 title_text = re.sub(r'^#{1,4}\s+', '', stripped)
                 story_list.append(para(f'<b>{clean(title_text)}</b>', S['body']))
                 continue
-            # **Titre** seul sur la ligne → gras
             bold_match = re.match(r'^\*\*(.+?)\*\*\s*$', stripped)
             if bold_match:
                 story_list.append(para(f'<b>{clean(bold_match.group(1))}</b>', S['body']))
                 continue
-            # Ligne courte sans ponctuation = sous-titre probable
             pre_clean = strip_markdown(stripped)
             is_subtitle = (
                 len(pre_clean) <= 80
@@ -436,7 +445,6 @@ def build_annexe1(project: dict, logo_bytes: bytes = None) -> bytes:
             if is_subtitle and not re.search(r'\b(le|la|les|des|une?|et|ou|dans|sur)\b', pre_clean[:30]):
                 story_list.append(para(f'<b>{clean(pre_clean)}</b>', S['body']))
                 continue
-            # Puce
             if pre_clean.startswith('• '):
                 story_list.append(para(f'• {clean(pre_clean[2:])}', S['body']))
             elif pre_clean:
@@ -445,7 +453,6 @@ def build_annexe1(project: dict, logo_bytes: bytes = None) -> bytes:
     render_rich_text(desc_raw, story)
     story.append(sp(10))
 
-    # ── Section 3 : Calendrier ─────────────────────────────────────────────────
     story.append(para(
         '<b>3. Grandes étapes et calendrier prévisionnel</b> des tâches, livrables et jalons de réalisation du projet (1 page maximum)',
         S['h1']))
@@ -474,11 +481,11 @@ def build_annexe1(project: dict, logo_bytes: bytes = None) -> bytes:
     ]]
     for r in (cal or []):
         cal_rows.append([
-            para(clean(str(r.get('etape', ''))),     S['lbl']),
-            para(clean(str(r.get('debut', ''))),     S['lbl']),
-            para(clean(str(r.get('fin', ''))),       S['lbl']),
-            para(clean(str(r.get('duree', ''))),     S['lbl']),
-            para(clean(str(r.get('livrables', '')), 500), S['lbl']),
+            para(clean(sanitize(r.get('etape', ''))), S['lbl']),
+            para(clean(sanitize(r.get('debut', ''))), S['lbl']),
+            para(clean(sanitize(r.get('fin', ''))), S['lbl']),
+            para(clean(sanitize(r.get('duree', ''))), S['lbl']),
+            para(clean(sanitize(r.get('livrables', '')), 500), S['lbl']),
         ])
     while len(cal_rows) < 9:
         cal_rows.append([para('', S['lbl'])] * 5)
@@ -495,7 +502,6 @@ def build_annexe1(project: dict, logo_bytes: bytes = None) -> bytes:
     ])))
     story.append(PageBreak())
 
-    # ── Section 4 : Budget ─────────────────────────────────────────────────────
     story.append(para('<b>4. Budget prévisionnel et demande financière</b>', S['h1']))
     story.append(para("Voir Annexe 1bis (tableau joint).", S['body']))
     story.append(sp(8))
@@ -516,24 +522,23 @@ def build_annexe1(project: dict, logo_bytes: bytes = None) -> bytes:
         story.append(sp(6))
     story.append(PageBreak())
 
-    # ── Établissement ──────────────────────────────────────────────────────────
     story.append(section_box("C) Établissement qui assurera la gestion financière du projet"))
     story.append(sp(5))
     etab = project.get('etablissement') or {}
-    rib  = project.get('rib') or {}
+    rib = project.get('rib') or {}
     story.append(form_table([
-        ('Etablissement :',   etab.get('nom', '')),
+        ('Etablissement :', etab.get('nom', '')),
         ('Agent Comptable :', etab.get('agent_comptable', '')),
-        ('Adresse:',          etab.get('adresse', '')),
-        ('Tél :',             etab.get('tel', '')),
-        ('Mél :',             etab.get('mel', '')),
+        ('Adresse:', etab.get('adresse', '')),
+        ('Tél :', etab.get('tel', '')),
+        ('Mél :', etab.get('mel', '')),
     ]))
     story.append(sp(6))
     story.append(form_table([
         ('Responsable du suivi financier', etab.get('resp_financier', '')),
-        ('Adresse:',                       etab.get('adresse_resp', '')),
-        ('Tél :',                          etab.get('tel_resp', '')),
-        ('Mél :',                          etab.get('mel_resp', '')),
+        ('Adresse:', etab.get('adresse_resp', '')),
+        ('Tél :', etab.get('tel_resp', '')),
+        ('Mél :', etab.get('mel_resp', '')),
     ]))
     story.append(sp(5))
     tva = 'Oui' if project.get('assujetti_tva') else 'Non'
@@ -541,22 +546,20 @@ def build_annexe1(project: dict, logo_bytes: bytes = None) -> bytes:
     story.append(sp(6))
     story.append(form_table([
         ('Identification bancaire', ''),
-        ('Banque',                  rib.get('banque', '')),
-        ('Titulaire du compte',     rib.get('titulaire', '')),
-        ('Domiciliation',           rib.get('domiciliation', '')),
-        ('N° de compte',            rib.get('compte', '')),
-        ('Code banque',             rib.get('code_banque', '')),
-        ('Clé RIB',                 rib.get('cle_rib', '')),
-        ('Code Guichet',            rib.get('code_guichet', '')),
+        ('Banque', rib.get('banque', '')),
+        ('Titulaire du compte', rib.get('titulaire', '')),
+        ('Domiciliation', rib.get('domiciliation', '')),
+        ('N° de compte', rib.get('compte', '')),
+        ('Code banque', rib.get('code_banque', '')),
+        ('Clé RIB', rib.get('cle_rib', '')),
+        ('Code Guichet', rib.get('code_guichet', '')),
     ]))
     story.append(sp(12))
 
-    # ── Section 5 : Appui ──────────────────────────────────────────────────────
     story.append(para("<b>5. Demande complémentaire d'appui ou d'accompagnement par l'INSPÉ Lille HdF</b>", S['h1']))
     story.append(text_box(project.get('demande_appui', ''), min_height=60))
     story.append(sp(16))
 
-    # Signatures
     story.append(Table(
         [[para(' Date et lieu\n\n\n Nom et Signature* du porteur de projet', S['lbl']),
           para(" Date et lieu\n\n\n Nom et Signature* du directeur d'unité de recherche", S['lbl'])]],
@@ -581,9 +584,15 @@ def build_annexe1(project: dict, logo_bytes: bytes = None) -> bytes:
 # ═══════════════════════════════════════════════════════════════════════════════
 def build_annexe1bis(project: dict, budget_lines: list, logo_bytes: bytes = None) -> bytes:
     buf = io.BytesIO()
-    doc = AAPDocTemplate(buf, logo_bytes=logo_bytes, pagesize=A4,
-                         topMargin=MT + 70, bottomMargin=MB,
-                         leftMargin=ML, rightMargin=MR)
+    doc = AAPDocTemplate(
+        buf,
+        logo_bytes=logo_bytes,
+        pagesize=A4,
+        topMargin=MT + 70,
+        bottomMargin=MB,
+        leftMargin=ML,
+        rightMargin=MR
+    )
     story = []
 
     coord = project.get('coordinateur', {}) or {}
@@ -601,12 +610,10 @@ def build_annexe1bis(project: dict, budget_lines: list, logo_bytes: bytes = None
         sp(8),
     ]
 
-    # Bloc notes
     story.append(Table(
         [[para('<i>Pour la colonne "détail" du tableau</i>', S['note_blue'])],
          [para("- nous vous invitons à vous rapprocher de la/du gestionnaire administratif et financier de votre unité de recherche pour connaître les taux horaire de vacations, les montants de gratification de stage… en vigueur lors de la constitution du dossier.", S['note_blue'])],
-         [para("- pour l'organisation des journées d'étude : merci de préciser le format envisagé (journée ou demi-journée) et les besoins : accueil café, repas (nombre), prises en charge…", S['note_blue'])],
-        ],
+         [para("- pour l'organisation des journées d'étude : merci de préciser le format envisagé (journée ou demi-journée) et les besoins : accueil café, repas (nombre), prises en charge…", S['note_blue'])]],
         colWidths=[CW],
         style=TableStyle([
             ('BOX',          (0, 0), (-1, -1), 0.3, COL_BLEU_NOTE),
@@ -618,19 +625,26 @@ def build_annexe1bis(project: dict, budget_lines: list, logo_bytes: bytes = None
     ))
     story.append(sp(8))
 
-    # Colonnes budget
     cw = [88, 103, 40, 36, 33, 36, 33, 40, 74.5]
 
-    def h(txt): return para(f'<b>{txt}</b>', S['tbl_hdr'])
-    def c(txt): return para(str(txt or ''), S['tbl_cell'])
-    def cb(txt): return para(f'<b>{str(txt or "")}</b>', S['tbl_total'])
+    def h(txt):
+        return para(f'<b>{sanitize(txt)}</b>', S['tbl_hdr'])
+
+    def c(txt):
+        return para(clean(sanitize(txt), 2000), S['tbl_cell'])
+
+    def cb(txt):
+        return para(f'<b>{clean(sanitize(txt), 2000)}</b>', S['tbl_total'])
 
     row1 = [
         h("NATURE DE LA DEPENSE\n(missions, prestations, frais de\nréception, vacations, gratification\nde stage, organisation séminaire,\ncolloque, journées d'étude,\nmatériel consommable utile au\nprojet de recherche, ...)"),
         h("DETAIL\n(type de prestation, nombre\nd'entretiens et d'heures\nà retranscrire…)"),
         h('TOTAL\nTTC\n(en\neuros)'),
         h("Aide demandée à l'INSPÉ Lille HdF TTC (en euros)"),
-        '', '', '', '',
+        '',
+        '',
+        '',
+        '',
         h('Co-\nfinancement,\nle cas\néchéant,\nTTC\n(en euros)'),
     ]
     row2 = ['', '', '', h('Dont montant TTC en euros pour 2027'), '', h('Dont montant TTC en euros pour 2028'), '', h('Total'), '']
@@ -641,15 +655,22 @@ def build_annexe1bis(project: dict, budget_lines: list, logo_bytes: bytes = None
     totals = {'total': 0, 'f27': 0, 'r27': 0, 'f28': 0, 'r28': 0, 'ins': 0, 'cof': 0}
 
     for line in (budget_lines or []):
-        t   = float(line.get('total', 0) or 0)
+        t = float(line.get('total', 0) or 0)
         f27 = float(line.get('fonct2027', 0) or 0)
         r27 = float(line.get('rh2027', 0) or 0)
         f28 = float(line.get('fonct2028', 0) or 0)
         r28 = float(line.get('rh2028', 0) or 0)
         cof = float(line.get('cofinancement', 0) or 0)
         ins = f27 + r27 + f28 + r28
-        totals['total'] += t;  totals['f27'] += f27; totals['r27'] += r27
-        totals['f28']   += f28; totals['r28'] += r28; totals['ins'] += ins; totals['cof'] += cof
+
+        totals['total'] += t
+        totals['f27'] += f27
+        totals['r27'] += r27
+        totals['f28'] += f28
+        totals['r28'] += r28
+        totals['ins'] += ins
+        totals['cof'] += cof
+
         bdata.append([
             c(line.get('nature', '')),
             c(line.get('detail', '')),
@@ -680,7 +701,7 @@ def build_annexe1bis(project: dict, budget_lines: list, logo_bytes: bytes = None
     N = len(bdata)
     HDR = 3
     DATA_END = N - 2
-    TOT_ROW  = N - 1
+    TOT_ROW = N - 1
 
     ts = TableStyle([
         ('BOX',        (0, 0), (-1, -1), 0.5, BLACK),
